@@ -1,0 +1,42 @@
+name: Security Scan
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 6 * * 1"  # weekly on Monday at 06:00 UTC
+
+jobs:
+  checkov:
+    name: Checkov (Terraform + Manifests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Checkov
+        uses: bridgecrewio/checkov-action@master
+        with:
+          directory: .
+          framework: terraform,kubernetes
+          soft_fail: false
+          output_format: cli
+          skip_check: >-
+            CKV_AZURE_7,
+            CKV_AZURE_141
+
+  trivy:
+    name: Trivy (Secret + Misconfiguration scan)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: secret,misconfig
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          format: table
