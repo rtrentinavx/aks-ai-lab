@@ -5,6 +5,12 @@
 
 terraform {
   required_version = ">= 1.7"
+
+  backend "azurerm" {
+    # Values injected via backend.hcl (local) or -backend-config env vars (CI).
+    # Run scripts/00-bootstrap-state.sh to provision the storage and generate backend.hcl.
+  }
+
   required_providers {
     azurerm = {
       source  = "hashicorp/azurerm"

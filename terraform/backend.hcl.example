@@ -1,0 +1,8 @@
+# Copy to backend.hcl (gitignored) after running scripts/00-bootstrap-state.sh
+# Usage: terraform init -backend-config=backend.hcl -migrate-state
+
+resource_group_name  = "rg-tfstate"
+storage_account_name = "tfstateaksailab<8-char-sub-prefix>"
+container_name       = "tfstate"
+key                  = "aks-ai-lab.tfstate"
+use_azuread_auth     = true

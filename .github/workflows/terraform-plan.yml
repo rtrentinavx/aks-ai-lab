@@ -32,7 +32,13 @@ jobs:
           terraform_version: "~1.7"
 
       - name: terraform init
-        run: terraform init
+        run: |
+          terraform init \
+            -backend-config="resource_group_name=${{ secrets.TF_BACKEND_RG }}" \
+            -backend-config="storage_account_name=${{ secrets.TF_BACKEND_SA }}" \
+            -backend-config="container_name=tfstate" \
+            -backend-config="key=aks-ai-lab.tfstate" \
+            -backend-config="use_azuread_auth=true"
         working-directory: terraform
 
       - name: terraform plan

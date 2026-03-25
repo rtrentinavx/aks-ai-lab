@@ -1,5 +1,6 @@
 # Terraform
 terraform.tfvars
+terraform/backend.hcl
 *.tfstate
 *.tfstate.*
 *.tfplan
