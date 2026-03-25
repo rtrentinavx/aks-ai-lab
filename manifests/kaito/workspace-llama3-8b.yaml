@@ -1,0 +1,38 @@
+###############################################################################
+# KAITO Workspace — Llama 3.1 8B Instruct
+# GPU: 1x A100 80GB (Standard_NC24ads_A100_v4) or 1x V100 16GB (tight fit)
+# Use for: high-quality reasoning, coding, instruction following
+# Note: Requires HuggingFace token for gated model access
+###############################################################################
+apiVersion: kaito.sh/v1beta1
+kind: Workspace
+metadata:
+  name: workspace-llama3-8b
+  namespace: inference
+  labels:
+    model: llama-3-8b
+    tier: standard
+resource:
+  instanceType: "Standard_NC6s_v3"    # V100 16GB — tight but workable at fp16
+  labelSelector:
+    matchLabels:
+      apps: llama3-8b-inference
+inference:
+  preset:
+    name: llama-3.1-8b-instruct
+  config: "llama3-8b-vllm-config"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: llama3-8b-vllm-config
+  namespace: inference
+data:
+  inference_config.yaml: |
+    vllm:
+      gpu-memory-utilization: 0.95
+      max-model-len: 4096    # Reduce if OOM; 8192 works on A100
+      max-num-seqs: 32
+      dtype: "float16"
+      # Enable prefix caching for system prompts
+      enable-prefix-caching: true

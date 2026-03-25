@@ -1,0 +1,40 @@
+###############################################################################
+# KAITO Workspace — Llama 3.3 70B Instruct (multi-node)
+# GPU: 2x nodes, each with 1x A100 80GB = 2x A100 total
+# Use for: production-grade quality, large context, complex reasoning
+# Note: Multi-node distributed inference via Torch Distributed Elastic
+###############################################################################
+apiVersion: kaito.sh/v1beta1
+kind: Workspace
+metadata:
+  name: workspace-llama3-70b
+  namespace: inference
+  labels:
+    model: llama-3-70b
+    tier: premium
+resource:
+  instanceType: "Standard_NC24ads_A100_v4"   # 1x A100 80GB per node
+  count: 2                                    # 2 nodes = 160GB VRAM total
+  labelSelector:
+    matchLabels:
+      apps: llama3-70b-inference
+inference:
+  preset:
+    name: llama-3.3-70b-instruct
+  config: "llama3-70b-vllm-config"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: llama3-70b-vllm-config
+  namespace: inference
+data:
+  inference_config.yaml: |
+    vllm:
+      gpu-memory-utilization: 0.90
+      max-model-len: 8192
+      max-num-seqs: 32
+      dtype: "bfloat16"           # A100 supports bfloat16 natively
+      tensor-parallel-size: 2     # Spread across 2 GPUs
+      pipeline-parallel-size: 1
+      enable-prefix-caching: true

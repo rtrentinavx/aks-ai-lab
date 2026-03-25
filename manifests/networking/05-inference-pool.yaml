@@ -1,0 +1,57 @@
+# InferencePool + InferenceModel + HTTPRoute template.
+# Placeholders — substitute before applying:
+#   <MODEL_NAME>      e.g. phi-4-mini-instruct
+#   <WORKSPACE_NAME>  e.g. workspace-phi4-mini (the KAITO Workspace name)
+#
+# Applied automatically by 02-deploy-model.sh once the workspace is Ready.
+# Manual usage:
+#   sed -e "s|<MODEL_NAME>|phi-4-mini-instruct|g" \
+#       -e "s|<WORKSPACE_NAME>|workspace-phi4-mini|g" \
+#       manifests/networking/05-inference-pool.yaml | kubectl apply -f -
+---
+# InferencePool: maps the model to its vLLM pods and the Endpoint Picker
+apiVersion: inference.networking.x-k8s.io/v1alpha2
+kind: InferencePool
+metadata:
+  name: <MODEL_NAME>-pool
+  namespace: inference
+spec:
+  targetPortNumber: 5000
+  selector:
+    matchLabels:
+      app: <WORKSPACE_NAME>
+  extensionRef:
+    name: inference-ext-server
+---
+# InferenceModel: declares the model name and criticality for the scheduler
+apiVersion: inference.networking.x-k8s.io/v1alpha2
+kind: InferenceModel
+metadata:
+  name: <MODEL_NAME>
+  namespace: inference
+spec:
+  modelName: <MODEL_NAME>
+  criticality: Standard
+  poolRef:
+    name: <MODEL_NAME>-pool
+---
+# HTTPRoute: directs /v1 traffic to the InferencePool (not a plain Service)
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: <MODEL_NAME>-route
+  namespace: inference
+spec:
+  parentRefs:
+    - name: inference-gateway
+      namespace: inference
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /v1
+      backendRefs:
+        - group: inference.networking.x-k8s.io
+          kind: InferencePool
+          name: <MODEL_NAME>-pool
+          port: 5000

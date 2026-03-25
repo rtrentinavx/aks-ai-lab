@@ -1,0 +1,137 @@
+###############################################################################
+# Ingress Option 2 — Application Gateway for Containers (AGC)
+#
+# STATUS: Recommended for production external traffic.
+#
+# WHAT IT IS:
+# AGC is Azure's next-generation managed load balancer for AKS. Unlike AGIC
+# (the old Application Gateway Ingress Controller), AGC:
+#   - Runs OUTSIDE the cluster (no in-cluster pods consuming node resources)
+#   - Is built on Envoy (not NGINX) — better performance, HTTP/2, gRPC native
+#   - Natively supports the Kubernetes Gateway API (not just the Ingress API)
+#   - Integrates with Azure WAF, Azure DDoS Protection
+#   - Handles TLS termination at the Azure network edge
+#
+# WHY IT'S GOOD FOR INFERENCE:
+# TLS offload and DDoS mitigation happen before traffic reaches the cluster,
+# so your GPU pods only process clean, authenticated requests. The Envoy
+# backend handles long-lived HTTP connections and SSE (streaming) natively.
+#
+# ENABLE AGC (one-time setup):
+#   # Install the ALB controller in the cluster
+#   helm install alb-controller oci://mcr.microsoft.com/application-lb/charts/alb-controller \
+#     --namespace azure-alb-system \
+#     --create-namespace \
+#     --set albController.namespace=azure-alb-system \
+#     --set albController.podIdentity.clientID=$(az identity show \
+#         --name aks-ai-lab-workload-identity \
+#         --resource-group rg-aks-ai-lab \
+#         --query clientId -o tsv)
+#
+# COST: ~$0.05/hr base + $0.008/LCU (Load Capacity Unit) per hour
+###############################################################################
+
+# --- ApplicationLoadBalancer: tells AGC which Azure subnet to provision in ---
+apiVersion: alb.networking.azure.io/v1
+kind: ApplicationLoadBalancer
+metadata:
+  name: inference-alb
+  namespace: inference
+spec:
+  associations:
+    # The subnet where AGC will deploy its managed load balancer
+    # Must be delegated to: Microsoft.ServiceNetworking/trafficControllers
+    - /subscriptions/<SUBSCRIPTION_ID>/resourceGroups/<RG_NAME>/providers/Microsoft.Network/virtualNetworks/aks-ai-lab-vnet/subnets/alb-subnet
+
+---
+# --- Gateway: the entry point, managed by AGC ---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: inference-gateway
+  namespace: inference
+  annotations:
+    # Links this Gateway to the ApplicationLoadBalancer above
+    alb.networking.azure.io/alb-name: inference-alb
+    alb.networking.azure.io/alb-namespace: inference
+spec:
+  gatewayClassName: azure-alb-external   # Managed by AGC
+  listeners:
+    - name: https-listener
+      port: 443
+      protocol: HTTPS
+      allowedRoutes:
+        namespaces:
+          from: Same
+      tls:
+        mode: Terminate
+        certificateRefs:
+          # Reference a Kubernetes TLS Secret (populated by CSI Key Vault driver)
+          - name: inference-tls-cert
+            kind: Secret
+
+    # Optional: HTTP listener that redirects to HTTPS
+    - name: http-listener
+      port: 80
+      protocol: HTTP
+      allowedRoutes:
+        namespaces:
+          from: Same
+
+---
+# --- HTTPRoute: routing rules for inference traffic ---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: inference-route
+  namespace: inference
+spec:
+  parentRefs:
+    - name: inference-gateway
+      namespace: inference
+  hostnames:
+    - "inference.yourdomain.com"
+  rules:
+    # Redirect HTTP → HTTPS
+    - matches:
+        - headers:
+            - name: ":scheme"
+              value: http
+      filters:
+        - type: RequestRedirect
+          requestRedirect:
+            scheme: https
+            statusCode: 301
+
+    # Route /v1/* to the KAITO vLLM service
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /v1
+      backendRefs:
+        - name: workspace-phi4-mini
+          port: 5000
+          weight: 100
+
+    # Health endpoint
+    - matches:
+        - path:
+            type: Exact
+            value: /health
+      backendRefs:
+        - name: workspace-phi4-mini
+          port: 5000
+
+---
+# --- TLS Secret populated by Secrets Store CSI driver from Key Vault ---
+# The SecretProviderClass in manifests/workload-identity/ handles the sync.
+# Add this object reference to your SecretProviderClass secretObjects section:
+#
+# secretObjects:
+#   - secretName: inference-tls-cert
+#     type: kubernetes.io/tls
+#     data:
+#       - objectName: inference-tls
+#         key: tls.crt
+#       - objectName: inference-tls-key
+#         key: tls.key

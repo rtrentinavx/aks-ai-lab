@@ -1,0 +1,78 @@
+###############################################################################
+# KEDA Trigger 1 — HTTP Add-on (HTTPScaledObject)
+#
+# WHAT THIS SOLVES:
+# Standard KEDA ScaledObjects can't scale from 0→1 based on HTTP traffic
+# because HPA requires at least one running pod to gather metrics. The KEDA
+# HTTP add-on solves this by inserting an interceptor proxy in front of your
+# service. Incoming requests are buffered at the proxy while KEDA brings the
+# pod up from zero, then forwarded once it's ready.
+#
+# TRAFFIC FLOW WITH HTTP ADD-ON:
+#
+#   Client → Service (interceptor proxy) → [KEDA buffers request]
+#                                             ↓ (pod count = 0)
+#                                          KEDA scales to 1
+#                                             ↓ (pod ready)
+#                                          Request forwarded → vLLM pod
+#
+# INSTALL THE HTTP ADD-ON FIRST:
+#   helm repo add kedacore https://kedacore.github.io/charts
+#   helm install http-add-on kedacore/keda-add-ons-http \
+#     --namespace keda \
+#     --set interceptor.replicas.min=2 \
+#     --set interceptor.replicas.max=5
+#
+# HOW SCALING WORKS:
+# - minReplicaCount: 0  → true scale-to-zero when no traffic
+# - targetValue: 5      → KEDA adds a replica for every 5 concurrent requests
+# - scaledownPeriod: 120 → waits 120s of idle before scaling to zero
+#                          (important for LLMs: avoid killing a model mid-generation)
+#
+# LATENCY CONSIDERATION:
+# Cold start (0→1) for a KAITO-managed vLLM pod is dominated by:
+#   1. NAP provisioning a new GPU node (~3-4 min if none available)
+#   2. Container image pull (~30-60s for vLLM image)
+#   3. Model weight loading into GPU VRAM (~30-120s depending on model)
+# Keep minReplicaCount: 1 in production; scale-to-zero for dev/lab only.
+###############################################################################
+
+# Install HTTP add-on (run once):
+# helm install http-add-on kedacore/keda-add-ons-http --namespace keda
+
+---
+apiVersion: http.keda.sh/v1alpha1
+kind: HTTPScaledObject
+metadata:
+  name: inference-http-scaler
+  namespace: inference
+spec:
+  # Points to the KAITO-created Service for your chosen model.
+  # KAITO creates a ClusterIP service named after the workspace.
+  # E.g. workspace-phi4-mini → service name: workspace-phi4-mini
+  scaleTargetRef:
+    deployment: workspace-phi4-mini   # Must match the Deployment KAITO creates
+    service: workspace-phi4-mini      # ClusterIP Service created by KAITO
+    port: 5000                        # vLLM listens on 5000 inside KAITO pods
+
+  # Scale-to-zero in dev. Set min: 1 for production to avoid cold-start latency.
+  replicas:
+    min: 0
+    max: 5
+
+  # Cooldown before scaling back to zero — critical for LLMs.
+  # Too short = pod killed mid-generation. 120s is a safe minimum.
+  scaledownPeriod: 120
+
+  # Scale metric: target 5 concurrent in-flight requests per replica.
+  # For long-running LLM generations, keep this number low (2-5).
+  # For short completions (Phi-3/4), you can go up to 10-20.
+  scalingMetric:
+    concurrency:
+      targetValue: 5
+
+  # Route only /v1/* paths through the scaler (vLLM OpenAI API paths)
+  pathPrefixes:
+    - "/v1/chat/completions"
+    - "/v1/completions"
+    - "/v1/models"

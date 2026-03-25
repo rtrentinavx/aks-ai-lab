@@ -1,0 +1,67 @@
+# CiliumNetworkPolicy — Zero-trust isolation for vLLM inference pods.
+#
+# Ingress: only Envoy Gateway pods (envoy-gateway-system namespace) may reach
+#          vLLM pods on port 5000. Prometheus scraping allowed on port 8000.
+# Egress:  DNS allowed to kube-system. HTTPS allowed for model downloads
+#          (HuggingFace, Azure). Prometheus push to monitoring namespace.
+#
+# Applied to all KAITO-managed pods in the inference namespace.
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: vllm-ingress
+  namespace: inference
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/managed-by: kaito
+  ingress:
+    # Allow Envoy Gateway to reach vLLM inference API
+    - fromEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: envoy-gateway-system
+      toPorts:
+        - ports:
+            - port: "5000"
+              protocol: TCP
+    # Allow Prometheus scraping of vLLM metrics
+    - fromEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: monitoring
+      toPorts:
+        - ports:
+            - port: "8000"
+              protocol: TCP
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: vllm-egress
+  namespace: inference
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/managed-by: kaito
+  egress:
+    # DNS resolution
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+    # Model downloads (HuggingFace) and Azure APIs
+    - toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+    # Prometheus metrics push to monitoring namespace
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: monitoring
+      toPorts:
+        - ports:
+            - port: "9090"
+              protocol: TCP

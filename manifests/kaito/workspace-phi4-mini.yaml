@@ -1,0 +1,37 @@
+###############################################################################
+# KAITO Workspace — Phi-4 Mini Instruct
+# GPU: 1x T4 (Standard_NC4as_T4_v3 — cheapest option, ~$0.50/hr)
+# Use for: fast iteration, low-cost testing, small prompts
+# vLLM: KAITO v0.9.0+ uses vLLM as the inference backend for all presets
+###############################################################################
+apiVersion: kaito.sh/v1beta1
+kind: Workspace
+metadata:
+  name: workspace-phi4-mini
+  namespace: inference
+  labels:
+    model: phi-4-mini
+    tier: budget
+resource:
+  instanceType: "Standard_NC4as_T4_v3"
+  labelSelector:
+    matchLabels:
+      apps: phi4-mini-inference
+inference:
+  preset:
+    name: phi-4-mini-instruct
+  # Optional vLLM config overrides via ConfigMap
+  config: "phi4-vllm-config"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: phi4-vllm-config
+  namespace: inference
+data:
+  inference_config.yaml: |
+    vllm:
+      gpu-memory-utilization: 0.90
+      max-model-len: 4096
+      max-num-seqs: 64
+      dtype: "float16"

@@ -1,0 +1,111 @@
+###############################################################################
+# Ollama — CPU inference for testing without GPU nodes
+#
+# Pulls a small model on startup and serves an OpenAI-compatible API on :11434.
+# Default model: tinyllama (1.1B params, ~700MB, usable on 4-core CPU nodes)
+#
+# Switch model via the OLLAMA_MODEL env var:
+#   tinyllama  — fastest, ~700MB
+#   phi3:mini  — smarter, ~2.3GB, needs ~6GB RAM
+#   qwen2:0.5b — very small, ~350MB
+###############################################################################
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ollama-cpu
+  namespace: inference
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ollama-cpu
+  template:
+    metadata:
+      labels:
+        app: ollama-cpu
+    spec:
+      initContainers:
+        # Pull the model before the main container starts serving
+        - name: pull-model
+          image: ollama/ollama:latest
+          command: ["sh", "-c", "ollama serve & sleep 5 && ollama pull $(OLLAMA_MODEL) && pkill ollama"]
+          env:
+            - name: OLLAMA_MODEL
+              value: "tinyllama"
+            - name: OLLAMA_MODELS
+              value: /models
+          volumeMounts:
+            - name: models
+              mountPath: /models
+          resources:
+            requests:
+              cpu: "2"
+              memory: "4Gi"
+            limits:
+              cpu: "4"
+              memory: "6Gi"
+
+      containers:
+        - name: ollama
+          image: ollama/ollama:latest
+          ports:
+            - containerPort: 11434
+          env:
+            - name: OLLAMA_MODEL
+              value: "tinyllama"
+            - name: OLLAMA_MODELS
+              value: /models
+            - name: OLLAMA_HOST
+              value: "0.0.0.0"
+          volumeMounts:
+            - name: models
+              mountPath: /models
+          resources:
+            requests:
+              cpu: "2"
+              memory: "4Gi"
+            limits:
+              cpu: "4"
+              memory: "6Gi"
+          readinessProbe:
+            httpGet:
+              path: /api/tags
+              port: 11434
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 6
+
+      volumes:
+        - name: models
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ollama-cpu
+  namespace: inference
+spec:
+  selector:
+    app: ollama-cpu
+  ports:
+    - name: http
+      port: 11434
+      targetPort: 11434
+---
+# HTTPRoute: maps /v1/* → Ollama OpenAI-compatible endpoint (/v1/chat/completions)
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: ollama-cpu-route
+  namespace: inference
+spec:
+  parentRefs:
+    - name: inference-gateway
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /v1
+      backendRefs:
+        - name: ollama-cpu
+          port: 11434

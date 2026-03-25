@@ -1,0 +1,171 @@
+###############################################################################
+# Ingress Option 3 — Istio Ingress Gateway + VirtualService
+#
+# STATUS: Recommended for production when you need:
+#   - mTLS between all pods (zero-trust inside the cluster)
+#   - Per-route timeout and retry control (critical for LLM inference)
+#   - Circuit breakers (prevent cascade failure when a vLLM pod is overloaded)
+#   - Detailed L7 observability (Kiali, Jaeger tracing per request)
+#
+# ENABLE THE AKS ISTIO ADD-ON (one-time):
+#   az aks mesh enable \
+#     --resource-group rg-aks-ai-lab \
+#     --name aks-ai-lab
+#
+#   # Enable the external ingress gateway
+#   az aks mesh enable-ingress-gateway \
+#     --resource-group rg-aks-ai-lab \
+#     --name aks-ai-lab \
+#     --ingress-gateway-type external
+#
+# HOW TRAFFIC FLOWS:
+#   Client → Istio Ingress Gateway (public IP, TLS termination)
+#          → VirtualService (routing rules, timeout, retry policy)
+#          → vLLM pod (via Envoy sidecar with mTLS)
+#
+# KEY INFERENCE-SPECIFIC SETTINGS IN THIS FILE:
+#   timeout: 120s       — long enough for generation; not infinite (prevents zombie connections)
+#   retries.attempts: 0 — NEVER retry LLM inference; non-idempotent
+#   outlierDetection    — circuit breaker: ejects overloaded vLLM replicas from routing pool
+###############################################################################
+
+# --- Gateway: defines the ingress entry point ---
+apiVersion: networking.istio.io/v1beta1
+kind: Gateway
+metadata:
+  name: inference-gateway
+  namespace: aks-istio-ingress   # Istio add-on manages this namespace
+spec:
+  selector:
+    istio: aks-istio-ingressgateway-external   # Targets the AKS-managed external gateway pod
+  servers:
+    - port:
+        number: 443
+        name: https
+        protocol: HTTPS
+      tls:
+        mode: SIMPLE              # TLS termination at the gateway
+        credentialName: inference-tls-cert   # Kubernetes Secret with TLS cert
+      hosts:
+        - "inference.yourdomain.com"
+
+    # HTTP → HTTPS redirect
+    - port:
+        number: 80
+        name: http
+        protocol: HTTP
+      tls:
+        httpsRedirect: true
+      hosts:
+        - "inference.yourdomain.com"
+
+---
+# --- VirtualService: the core routing + inference-specific traffic policy ---
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: inference-vs
+  namespace: inference
+spec:
+  hosts:
+    - "inference.yourdomain.com"
+    - workspace-phi4-mini          # Also applies to in-cluster pod-to-pod calls
+  gateways:
+    - aks-istio-ingress/inference-gateway
+    - mesh                         # "mesh" = applies to sidecar-to-sidecar traffic too
+  http:
+    # ── Route 1: Chat completions (longest timeout) ────────────────────────
+    - match:
+        - uri:
+            prefix: /v1/chat/completions
+      timeout: 120s                # 2 min — covers large model + long output
+      retries:
+        attempts: 0                # CRITICAL: zero retries for LLM inference.
+                                   # A retry sends a second request to generate
+                                   # a different completion — wasting GPU and
+                                   # confusing the client.
+      route:
+        - destination:
+            host: workspace-phi4-mini
+            port:
+              number: 5000
+
+    # ── Route 2: Legacy completions ────────────────────────────────────────
+    - match:
+        - uri:
+            prefix: /v1/completions
+      timeout: 120s
+      retries:
+        attempts: 0
+      route:
+        - destination:
+            host: workspace-phi4-mini
+            port:
+              number: 5000
+
+    # ── Route 3: Models list + health (fast, retryable) ───────────────────
+    - match:
+        - uri:
+            prefix: /v1/models
+        - uri:
+            exact: /health
+      timeout: 5s
+      retries:
+        attempts: 3
+        retryOn: "gateway-error,connect-failure,503"
+        perTryTimeout: 2s
+      route:
+        - destination:
+            host: workspace-phi4-mini
+            port:
+              number: 5000
+
+---
+# --- DestinationRule: circuit breaker + connection pool limits ---
+# Applied to all traffic going TO workspace-phi4-mini pods.
+# The Envoy sidecar on the CLIENT side enforces these rules.
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: inference-dr
+  namespace: inference
+spec:
+  host: workspace-phi4-mini
+  trafficPolicy:
+    # Connection pool: limit concurrent connections to each vLLM pod.
+    # vLLM handles its own internal queuing (max-num-seqs). Limiting
+    # connections here prevents more requests arriving than vLLM can queue.
+    connectionPool:
+      http:
+        http2MaxRequests: 100        # Max concurrent requests to one pod
+        maxRequestsPerConnection: 0  # 0 = unlimited (keep-alive)
+        h2UpgradePolicy: UPGRADE     # Use HTTP/2 for better multiplexing
+      tcp:
+        maxConnections: 100
+
+    # Outlier detection (circuit breaker):
+    # If a vLLM pod returns 5xx errors, Istio temporarily removes it from
+    # the load balancing pool. This prevents routing to a crashed or
+    # OOM-killed pod while it restarts.
+    outlierDetection:
+      consecutive5xxErrors: 3        # Eject after 3 consecutive 5xx responses
+      interval: 10s                  # Check every 10 seconds
+      baseEjectionTime: 30s          # Stay ejected for 30s minimum
+      maxEjectionPercent: 50         # Never eject more than 50% of pods
+                                     # (keeps at least half the pool active)
+    # mTLS: all traffic between sidecars is encrypted and mutually authenticated
+    tls:
+      mode: ISTIO_MUTUAL
+
+---
+# --- PeerAuthentication: enforce mTLS for all pods in the inference namespace ---
+# Any pod WITHOUT an Istio sidecar cannot communicate with vLLM pods.
+# This ensures only workloads that Kubernetes has authenticated can reach the model.
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: inference-mtls
+  namespace: inference
+spec:
+  mtls:
+    mode: STRICT    # Reject all non-mTLS traffic. Use PERMISSIVE during migration.

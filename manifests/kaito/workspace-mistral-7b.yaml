@@ -1,0 +1,37 @@
+###############################################################################
+# KAITO Workspace — Mistral 7B Instruct v0.3
+# GPU: 1x T4 16GB (Standard_NC16as_T4_v3) or 1x V100 (Standard_NC6s_v3)
+# Use for: balanced quality/cost, instruction-following, function calling
+###############################################################################
+apiVersion: kaito.sh/v1beta1
+kind: Workspace
+metadata:
+  name: workspace-mistral-7b
+  namespace: inference
+  labels:
+    model: mistral-7b
+    tier: standard
+resource:
+  instanceType: "Standard_NC16as_T4_v3"   # Switch to NC6s_v3 for V100
+  labelSelector:
+    matchLabels:
+      apps: mistral-7b-inference
+inference:
+  preset:
+    name: mistral-7b-instruct
+  config: "mistral-vllm-config"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mistral-vllm-config
+  namespace: inference
+data:
+  inference_config.yaml: |
+    vllm:
+      gpu-memory-utilization: 0.92
+      max-model-len: 8192
+      max-num-seqs: 64
+      dtype: "float16"
+      # Enable sliding window attention for long context efficiency
+      enable-chunked-prefill: true

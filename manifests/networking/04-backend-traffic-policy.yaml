@@ -1,0 +1,46 @@
+# BackendTrafficPolicy — circuit breaker and timeout for inference routes.
+# Applied to the inference-gateway; affects all InferencePool backends.
+#
+# responseTimeout: set higher than your p99 generation time.
+# maxPendingRequests: queue depth before Envoy returns 503. Size this to
+#   accommodate cold-start latency (NAP provisioning can take 3-5 min).
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: inference-circuit-breaker
+  namespace: inference
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: Gateway
+    name: inference-gateway
+    namespace: inference
+  circuitBreaker:
+    maxConnections: 200
+    maxPendingRequests: 100
+    maxParallelRequests: 200
+  timeout:
+    http:
+      responseTimeout: 180s   # Exceeds p99 generation time for large models
+---
+# ClientTrafficPolicy — keep-alive settings for long-lived SSE streams.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: ClientTrafficPolicy
+metadata:
+  name: inference-client-traffic
+  namespace: inference
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: Gateway
+    name: inference-gateway
+    namespace: inference
+  timeout:
+    http:
+      requestReceivedTimeout: 10s    # Time to receive full request headers
+  http1:
+    enableTrailers: false
+  http2:
+    initialStreamWindowSize: "65536"
+    initialConnectionWindowSize: "1048576"

@@ -1,0 +1,153 @@
+###############################################################################
+# Ingress Option 4 — Gateway API Inference Extension
+#
+# STATUS: Alpha/beta (June 2025+). Production-ready for single-model pools.
+# Maturing for multi-model and LoRA adapter scenarios.
+#
+# WHAT IT ADDS OVER STANDARD INGRESS:
+# Standard load balancers route round-robin across vLLM replicas. This is
+# actively harmful for inference performance:
+#   - A replica with a full KV cache (high latency) gets the same traffic as
+#     a replica with an empty cache (low latency)
+#   - Requests with the same system prompt may hit replicas that don't have
+#     that prompt's KV cache, wasting prefix caching entirely
+#
+# The Inference Extension adds:
+#   1. KV-cache-aware routing — sends requests to the replica with the most
+#      available KV cache headroom (lowest vllm:gpu_cache_usage_perc)
+#   2. Prefix-cache-aware routing — routes requests with the same system
+#      prompt prefix to the replica that already has it cached (reduces TTFT
+#      by 40-60% for chatbot workloads)
+#   3. Per-request criticality — mark some requests as Critical to get
+#      priority over background batch jobs sharing the same pool
+#   4. InferencePool CRD — a named, load-balanced group of model replicas
+#      that KEDA can scale and the router treats as a single unit
+#
+# INSTALL (requires a Gateway API-compatible controller: Istio, AGC, or kgateway):
+#   kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/latest/download/manifests.yaml
+#
+# PREREQUISITE: A working Gateway from option 2 (AGC) or option 3 (Istio).
+# This file assumes Istio is already configured.
+###############################################################################
+
+# --- InferencePool: a named group of vLLM replicas ---
+# The pool is the unit KEDA scales and the router load-balances across.
+# It uses a label selector to find vLLM pods dynamically — new replicas
+# added by KEDA are automatically included.
+apiVersion: inference.networking.x-k8s.io/v1alpha2
+kind: InferencePool
+metadata:
+  name: phi4-mini-pool
+  namespace: inference
+spec:
+  # Port that vLLM listens on inside the pod (not the Service port)
+  targetPortNumber: 5000
+
+  # Label selector — matches the pods KAITO creates for this workspace
+  selector:
+    matchLabels:
+      apps: phi4-mini-inference
+
+  # Extension reference: connects the pool to the inference-aware routing logic
+  extensionRef:
+    name: inference-ext-server   # Installed by the inference extension manifest
+
+---
+# --- InferenceModel: maps an OpenAI model name to a pool ---
+# Clients send requests with "model": "phi-4-mini-instruct" and the router
+# looks up which InferencePool serves that model name.
+# This allows multiple models to share the same Gateway entry point.
+apiVersion: inference.networking.x-k8s.io/v1alpha2
+kind: InferenceModel
+metadata:
+  name: phi-4-mini-instruct
+  namespace: inference
+spec:
+  # Must match exactly what clients send in the "model" field
+  modelName: phi-4-mini-instruct
+
+  # Criticality: Standard, Critical, or Sheddable
+  #   Critical  — prioritized, never shed under load
+  #   Standard  — normal priority (use for interactive user traffic)
+  #   Sheddable — dropped first under overload (use for batch/background jobs)
+  criticality: Standard
+
+  # Which pool handles this model
+  poolRef:
+    name: phi4-mini-pool
+
+---
+# --- InferenceModel: second model pointing to a different pool ---
+# Each model gets its own InferenceModel and InferencePool.
+# Clients can call either model through the same Gateway endpoint.
+apiVersion: inference.networking.x-k8s.io/v1alpha2
+kind: InferenceModel
+metadata:
+  name: mistral-7b-instruct
+  namespace: inference
+spec:
+  modelName: mistral-7b-instruct
+  criticality: Standard
+  poolRef:
+    name: mistral-7b-pool   # Defined separately — matches workspace-mistral-7b pods
+
+---
+# --- HTTPRoute: routes /v1 traffic to the InferencePool instead of a Service ---
+# The key difference from a standard HTTPRoute: backendRefs points to an
+# InferencePool (group=inference.networking.x-k8s.io, kind=InferencePool)
+# instead of a plain Kubernetes Service.
+# The inference extension intercepts these requests and applies model-aware routing.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: inference-route
+  namespace: inference
+spec:
+  parentRefs:
+    - name: inference-gateway
+      namespace: aks-istio-ingress   # Your Gateway from option 3 (or AGC)
+  hostnames:
+    - "inference.yourdomain.com"
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /v1
+      backendRefs:
+        # Inference-aware backend — not a plain Service
+        - group: inference.networking.x-k8s.io
+          kind: InferencePool
+          name: phi4-mini-pool   # Router selects the best replica within the pool
+          port: 5000
+
+---
+# --- KEDA ScaledObject aligned to the InferencePool ---
+# Scale the Deployment that backs the InferencePool based on vLLM queue depth.
+# When KEDA adds replicas, the InferencePool router automatically includes them.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: phi4-pool-scaler
+  namespace: inference
+spec:
+  scaleTargetRef:
+    name: workspace-phi4-mini   # KAITO-managed Deployment
+  minReplicaCount: 1
+  maxReplicaCount: 8
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: "https://<AMW_ENDPOINT>.prometheus.monitor.azure.com"
+        # Scale when average waiting requests across all pool replicas exceeds 5
+        query: |
+          avg(
+            vllm:num_requests_waiting{
+              namespace="inference",
+              pod=~"workspace-phi4-mini.*"
+            }
+          )
+        metricName: vllm_queue_depth
+        threshold: "5"
+        activationThreshold: "1"
+      authenticationRef:
+        name: azure-prom-auth

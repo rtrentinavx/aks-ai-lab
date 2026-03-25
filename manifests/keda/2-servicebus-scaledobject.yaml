@@ -1,0 +1,140 @@
+###############################################################################
+# KEDA Trigger 2 — Azure Service Bus Queue
+#
+# WHAT THIS SOLVES:
+# Async / batch inference scenarios. Instead of a client waiting on an HTTP
+# connection, it drops a JSON payload into a Service Bus queue. A worker pod
+# picks it up, calls the vLLM API, and writes results back (to blob, another
+# queue, or DB). KEDA scales the number of worker pods based on queue depth.
+#
+# ARCHITECTURE:
+#
+#   Producer → [Service Bus Queue: inference-requests]
+#                         ↓  (messageCount > threshold)
+#                      KEDA ScaledObject
+#                         ↓
+#               Worker Deployment (0 → N pods)
+#                         ↓
+#              vLLM Service (KAITO endpoint)
+#                         ↓
+#               Results → Storage / downstream queue
+#
+# WHY WORKLOAD IDENTITY INSTEAD OF CONNECTION STRING:
+# The TriggerAuthentication uses azure-workload provider. KEDA exchanges its
+# OIDC token for a short-lived AAD token scoped to Service Bus. No connection
+# strings stored in Secrets or ScaledObject metadata.
+#
+# KEY PARAMETERS:
+#   messageCount: "5"  → 1 worker replica per 5 queued messages
+#   activationMessageCount: "1" → first message triggers scale-from-zero
+#   cooldownPeriod: 300 → 5 min idle before scaling to zero
+#
+# TESTING:
+#   # Send a test message (requires Service Bus Data Sender role):
+#   az servicebus queue message send \
+#     --resource-group rg-aks-ai-lab \
+#     --namespace-name aks-ai-lab-sb \
+#     --name inference-requests \
+#     --body '{"model":"phi-4-mini-instruct","messages":[{"role":"user","content":"Hello"}]}'
+###############################################################################
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: inference-sb-scaler
+  namespace: inference
+spec:
+  scaleTargetRef:
+    name: inference-worker   # Deployment that processes queue messages
+
+  pollingInterval: 15        # Check queue depth every 15 seconds
+  cooldownPeriod: 300        # Scale to zero after 5 min of empty queue
+  minReplicaCount: 0         # True scale-to-zero
+  maxReplicaCount: 10        # Cap workers — GPU vLLM is the real bottleneck
+
+  # HPA scale-up/down behavior tuning
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: 0    # Scale up immediately on new messages
+          policies:
+            - type: Pods
+              value: 3
+              periodSeconds: 15            # Add up to 3 pods per 15s burst
+        scaleDown:
+          stabilizationWindowSeconds: 120  # Be conservative scaling down
+          policies:
+            - type: Percent
+              value: 25
+              periodSeconds: 60
+
+  triggers:
+    - type: azure-servicebus
+      metadata:
+        namespace: "<SERVICEBUS_NAMESPACE>"         # e.g. aks-ai-lab-sb
+        queueName: inference-requests
+        # 1 worker per 5 queued messages
+        messageCount: "5"
+        # Don't scale from 0 until at least 1 message arrives
+        activationMessageCount: "1"
+        # Use Workload Identity (no connection string needed)
+        cloud: AzurePublicCloud
+      authenticationRef:
+        name: azure-sb-auth
+
+---
+###############################################################################
+# Inference Worker Deployment
+# Reads from Service Bus, calls the local vLLM endpoint, writes results.
+# Starts at 0 replicas — KEDA brings it to life when messages arrive.
+###############################################################################
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inference-worker
+  namespace: inference
+spec:
+  replicas: 0        # KEDA controls this
+  selector:
+    matchLabels:
+      app: inference-worker
+  template:
+    metadata:
+      labels:
+        app: inference-worker
+        azure.workload.identity/use: "true"   # Enables token injection webhook
+    spec:
+      serviceAccountName: inference-sa        # Federated with Azure managed identity
+
+      containers:
+        - name: worker
+          image: python:3.12-slim
+          command:
+            - python
+            - /app/worker.py
+          env:
+            - name: SERVICEBUS_NAMESPACE
+              value: "<SERVICEBUS_NAMESPACE>.servicebus.windows.net"
+            - name: QUEUE_NAME
+              value: inference-requests
+            - name: VLLM_ENDPOINT
+              value: "http://workspace-phi4-mini.inference.svc.cluster.local:5000/v1"
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+          volumeMounts:
+            - name: secrets-store
+              mountPath: /mnt/secrets
+              readOnly: true
+
+      volumes:
+        - name: secrets-store
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: lab-secrets

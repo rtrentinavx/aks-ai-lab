@@ -1,0 +1,95 @@
+###############################################################################
+# NAP GPU NodePool — Karpenter CRD for AKS
+# This NodePool tells NAP to auto-provision NVIDIA GPU VMs when GPU-requesting
+# pods appear as pending. Nodes are cleaned up when idle.
+###############################################################################
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: gpu-inference
+  annotations:
+    # Human-readable description
+    description: "Auto-provision NVIDIA GPU nodes for LLM inference workloads"
+spec:
+  template:
+    metadata:
+      labels:
+        workload-type: gpu-inference
+    spec:
+      nodeClassRef:
+        group: karpenter.azure.com
+        kind: AKSNodeClass
+        name: gpu-inference-class
+
+      requirements:
+        # Only on-demand for GPU inference (Spot = risk of eviction mid-inference)
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["on-demand"]
+
+        # Architecture
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["amd64"]
+
+        # GPU SKU families — ordered by cost/capability:
+        # NC-series (V100, A100): production-grade inference
+        # NCas_T4_v3: cheapest option, good for Phi-3/Phi-4 and Mistral 7B
+        - key: karpenter.azure.com/sku-family
+          operator: In
+          values: ["NC"]
+
+        # Lock in specific GPU-capable SKUs to avoid over-provisioning
+        # T4 (16GB VRAM) — Phi-3, Phi-4, Mistral 7B
+        # V100 (16-32GB) — Llama 3 8B
+        # A100 (40/80GB) — Llama 3 70B
+        - key: karpenter.azure.com/sku-name
+          operator: In
+          values:
+            - Standard_NC4as_T4_v3   # 4 vCPU, 28 GiB RAM, 1x T4 (16 GiB VRAM)
+            - Standard_NC8as_T4_v3   # 8 vCPU, 56 GiB RAM, 1x T4 (16 GiB VRAM)
+            - Standard_NC16as_T4_v3  # 16 vCPU, 110 GiB RAM, 1x T4 (16 GiB VRAM)
+            - Standard_NC6s_v3       # 6 vCPU, 112 GiB RAM, 1x V100 (16 GiB VRAM)
+            - Standard_NC12s_v3      # 12 vCPU, 224 GiB RAM, 2x V100
+            - Standard_NC24ads_A100_v4 # 24 vCPU, 220 GiB RAM, 1x A100 (80 GiB VRAM)
+
+        # Only Linux nodes
+        - key: kubernetes.io/os
+          operator: In
+          values: ["linux"]
+
+      # Taint GPU nodes so only GPU-requesting pods land here
+      taints:
+        - key: nvidia.com/gpu
+          value: "true"
+          effect: NoSchedule
+
+  # Disruption — remove empty or underutilized GPU nodes quickly to save cost
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 2m    # Wait 2 min of empty before deprovisioning
+
+  # Hard cap to prevent runaway GPU spend
+  limits:
+    nvidia.com/gpu: "8"
+    cpu: "96"
+    memory: "896Gi"
+
+---
+###############################################################################
+# AKSNodeClass — Azure-specific settings for GPU nodes
+###############################################################################
+apiVersion: karpenter.azure.com/v1alpha2
+kind: AKSNodeClass
+metadata:
+  name: gpu-inference-class
+spec:
+  # Use same VNet/subnet as the system node pool
+  # Replace with your actual subnet resource ID from Terraform output
+  vnetSubnetID: "/subscriptions/<SUBSCRIPTION_ID>/resourceGroups/<RG_NAME>/providers/Microsoft.Network/virtualNetworks/aks-ai-lab-vnet/subnets/aks-subnet"
+
+  # Larger OS disk for model weight caching
+  osDiskSizeGB: 256
+
+  # Ubuntu 22.04 — compatible with NVIDIA GPU drivers on AKS
+  imageFamily: Ubuntu2204

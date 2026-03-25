@@ -1,0 +1,44 @@
+###############################################################################
+# KEDA TriggerAuthentication — Workload Identity for Azure triggers
+#
+# HOW IT WORKS:
+# KEDA's operator needs credentials to poll Azure resources (Service Bus,
+# Managed Prometheus). Instead of a stored connection string, we use the
+# azure-workload identity provider — KEDA's operator SA exchanges its OIDC
+# token for an AAD token scoped to the target Azure resource.
+#
+# This TriggerAuthentication is referenced by ScaledObjects instead of
+# embedding connection strings directly in the trigger metadata.
+#
+# TWO SEPARATE AUTH OBJECTS:
+#   1. azure-sb-auth      — for Service Bus triggers (uses KEDA identity)
+#   2. azure-prom-auth    — for Prometheus triggers (uses KEDA identity)
+#
+# The KEDA identity's federated credential is created in Terraform:
+#   subject = "system:serviceaccount:keda:keda-operator"
+###############################################################################
+
+# --- Service Bus / Event Hub TriggerAuthentication ---
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: azure-sb-auth
+  namespace: inference
+spec:
+  podIdentity:
+    provider: azure-workload
+    # Client ID of the KEDA managed identity
+    # From: terraform output keda_identity_client_id
+    identityId: "<KEDA_IDENTITY_CLIENT_ID>"
+
+---
+# --- Azure Managed Prometheus TriggerAuthentication ---
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: azure-prom-auth
+  namespace: inference
+spec:
+  podIdentity:
+    provider: azure-workload
+    identityId: "<KEDA_IDENTITY_CLIENT_ID>"

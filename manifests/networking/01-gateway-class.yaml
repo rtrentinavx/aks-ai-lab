@@ -1,0 +1,8 @@
+# Envoy Gateway GatewayClass
+# Applied once per cluster during 01-deploy.sh
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: envoy-gateway
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller

@@ -1,0 +1,82 @@
+###############################################################################
+# Ingress Option 1 — AKS App Routing Add-on (NGINX)
+#
+# STATUS: Dev / lab use only.
+# The community NGINX Ingress controller reached end-of-life March 2026.
+# Microsoft's App Routing add-on (which wraps NGINX) is supported only through
+# November 2026 with critical security patches only. Do not build new
+# production systems on this. Use for quick local testing.
+#
+# ENABLE THE ADD-ON (once per cluster):
+#   az aks addon enable \
+#     --resource-group rg-aks-ai-lab \
+#     --name aks-ai-lab \
+#     --addon web_application_routing
+#
+# WHAT IT DOES:
+# Deploys an NGINX pod inside the cluster and creates an Azure Load Balancer
+# with a public IP. All Ingress resources using the class
+# "webapprouting.kubernetes.azure.com" are handled by this controller.
+# TLS certs are pulled from Key Vault automatically via the annotation.
+#
+# LIMITATIONS FOR INFERENCE:
+# - No per-route timeout control (LLM requests can take 90s+; default NGINX
+#   proxy timeout is 60s — you MUST override it via annotation)
+# - No retry suppression (NGINX may retry failed requests; for LLMs this causes
+#   duplicate generations)
+# - Round-robin load balancing only — no KV-cache awareness across replicas
+###############################################################################
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: inference-ingress
+  namespace: inference
+  annotations:
+    # Key Vault cert URI — App Routing pulls and rotates TLS cert automatically
+    # Get the cert URI: az keyvault certificate show --vault-name <KV> --name inference-tls --query id -o tsv
+    kubernetes.azure.com/tls-cert-keyvault-uri: "https://<KEY_VAULT_NAME>.vault.azure.net/certificates/inference-tls"
+
+    # CRITICAL for LLM inference: increase timeouts beyond the 60s default.
+    # vLLM generations can take 90s+ for large models / long outputs.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "10"
+
+    # Disable request buffering — stream tokens back to client as generated
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
+
+    # Allow large request bodies (multi-modal payloads, long system prompts)
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+
+    # Disable retries — LLM inference is non-idempotent.
+    # A retried request generates a second (different) completion and wastes GPU.
+    nginx.ingress.kubernetes.io/proxy-next-upstream: "off"
+
+spec:
+  ingressClassName: webapprouting.kubernetes.azure.com
+  tls:
+    - hosts:
+        - inference.yourdomain.com
+      secretName: inference-tls-secret   # Created automatically by App Routing from Key Vault
+  rules:
+    - host: inference.yourdomain.com
+      http:
+        paths:
+          # Route all OpenAI-compatible API paths to the KAITO vLLM service
+          - path: /v1
+            pathType: Prefix
+            backend:
+              service:
+                name: workspace-phi4-mini   # KAITO creates this Service automatically
+                port:
+                  number: 5000
+
+          # Health and metrics endpoints (for external monitoring)
+          - path: /health
+            pathType: Exact
+            backend:
+              service:
+                name: workspace-phi4-mini
+                port:
+                  number: 5000

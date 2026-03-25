@@ -1,0 +1,16 @@
+# Internal Envoy Gateway — receives traffic from App Gateway for Containers.
+# Not publicly exposed; AGfC or APIM reaches it via VNet-internal routing.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: inference-gateway
+  namespace: inference
+spec:
+  gatewayClassName: envoy-gateway
+  listeners:
+    - name: http
+      port: 80
+      protocol: HTTP
+      allowedRoutes:
+        namespaces:
+          from: Same

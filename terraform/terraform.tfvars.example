@@ -1,0 +1,28 @@
+# Copy to terraform.tfvars and fill in your values
+#
+# Authentication — set these environment variables before running terraform:
+#
+#   export ARM_SUBSCRIPTION_ID="00000000-0000-0000-0000-000000000000"
+#   export ARM_TENANT_ID="00000000-0000-0000-0000-000000000000"
+#
+#   Service principal:
+#     export ARM_CLIENT_ID="..."
+#     export ARM_CLIENT_SECRET="..."
+#
+#   Azure CLI / managed identity:
+#     export ARM_USE_CLI=true
+
+resource_group_name  = "rg-aks-ai-lab"
+apim_publisher_name  = "Your Name"
+apim_publisher_email = "you@example.com"
+# apim_sku           = "Developer_1"   # or Premium_1 for production
+# private_cluster    = true            # enables private API server + NAT Gateway egress
+location            = "eastus2"   # Must have NC-series GPU quota
+cluster_name        = "aks-ai-lab"
+kubernetes_version  = "1.31"
+
+tags = {
+  env     = "lab"
+  project = "aks-ai-lab"
+  owner   = "your-alias"
+}

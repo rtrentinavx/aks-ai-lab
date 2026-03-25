@@ -1,0 +1,20 @@
+# Terraform
+terraform.tfvars
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+.terraform/
+.terraform.lock.hcl
+
+# Blog / drafts / docs
+blog-post.md
+docs/
+
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+*.swp

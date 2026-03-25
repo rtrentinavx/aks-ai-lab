@@ -1,0 +1,190 @@
+###############################################################################
+# vLLM Standalone Deployment (non-KAITO path)
+#
+# WHEN TO USE THIS vs KAITO:
+#
+#   KAITO Workspace CRD         │  vLLM Standalone Deployment
+#   ─────────────────────────── │  ──────────────────────────
+#   One-line model deployment   │  Full control over all vLLM flags
+#   Auto GPU node provisioning  │  Manual node/toleration management
+#   Managed preset configs      │  Custom image, args, env vars
+#   Integrated with NAP         │  Works with any node pool
+#   Best for: standard models   │  Best for: custom/quantized models,
+#                               │    LoRA adapters, bleeding-edge vLLM
+#
+# This manifest deploys Mistral 7B Instruct directly with vLLM.
+# It serves the OpenAI-compatible API on port 8000.
+#
+# VOLUME STRATEGY:
+# A PVC is used for model caching. Without it, every pod restart re-downloads
+# the model from HuggingFace (~14GB for Mistral 7B). With the PVC attached,
+# the model is cached in the volume and load time drops from ~10min to ~60s.
+#
+# GPU RESOURCE REQUEST:
+# The "nvidia.com/gpu: 1" resource request is what triggers NAP to provision
+# a GPU node. Without this, the pod schedules on a CPU node and fails.
+# The toleration matches the taint on NAP-provisioned GPU nodes.
+###############################################################################
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: vllm-model-cache
+  namespace: inference
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 60Gi     # Mistral 7B ≈ 14GB fp16; headroom for KV cache
+  storageClassName: managed-premium
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-mistral-7b
+  namespace: inference
+  labels:
+    app: vllm-mistral-7b
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-mistral-7b
+  template:
+    metadata:
+      labels:
+        app: vllm-mistral-7b
+        azure.workload.identity/use: "true"
+    spec:
+      serviceAccountName: inference-sa
+
+      # Tolerate the taint NAP places on GPU nodes
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+
+      # Affinity: prefer NC-family nodes (NAP label)
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: karpenter.azure.com/sku-family
+                    operator: In
+                    values: ["NC"]
+
+      initContainers:
+        # Ensure /dev/shm is large enough for tensor parallelism shared memory
+        - name: fix-shm
+          image: busybox
+          command: ["sh", "-c", "chmod 777 /dev/shm"]
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
+
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:v0.8.4
+          command: ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+          args:
+            - "--model"
+            - "mistralai/Mistral-7B-Instruct-v0.3"
+            - "--download-dir"
+            - "/models"
+            - "--dtype"
+            - "float16"
+            - "--max-model-len"
+            - "8192"
+            - "--gpu-memory-utilization"
+            - "0.92"
+            - "--tensor-parallel-size"
+            - "1"
+            - "--max-num-seqs"
+            - "64"
+            - "--enable-prefix-caching"      # Cache repeated system prompts
+            - "--served-model-name"
+            - "mistral-7b"                  # Name returned by /v1/models
+            - "--port"
+            - "8000"
+
+          ports:
+            - containerPort: 8000
+              name: http
+
+          env:
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: lab-secrets-k8s      # Mirrored from Key Vault by CSI driver
+                  key: hf-token
+            - name: HOME
+              value: /models
+            - name: HF_HOME
+              value: /models/.cache/huggingface
+
+          resources:
+            requests:
+              cpu: "4"
+              memory: "16Gi"
+              nvidia.com/gpu: "1"            # ← This triggers NAP GPU node provisioning
+            limits:
+              nvidia.com/gpu: "1"
+
+          volumeMounts:
+            - name: model-cache
+              mountPath: /models
+            - name: dshm
+              mountPath: /dev/shm
+            - name: secrets-store
+              mountPath: /mnt/secrets
+              readOnly: true
+
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 120        # Model loading takes time
+            periodSeconds: 15
+            failureThreshold: 20
+
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 180
+            periodSeconds: 30
+            failureThreshold: 5
+
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: vllm-model-cache
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi
+        - name: secrets-store
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: lab-secrets
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-mistral-7b
+  namespace: inference
+spec:
+  selector:
+    app: vllm-mistral-7b
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+  type: ClusterIP

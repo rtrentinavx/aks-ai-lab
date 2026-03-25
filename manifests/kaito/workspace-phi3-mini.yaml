@@ -1,0 +1,35 @@
+###############################################################################
+# KAITO Workspace — Phi-3 Mini 128K Instruct
+# GPU: 1x T4 (Standard_NC8as_T4_v3)
+# Use for: long-context inference, 128K token window testing
+###############################################################################
+apiVersion: kaito.sh/v1beta1
+kind: Workspace
+metadata:
+  name: workspace-phi3-mini-128k
+  namespace: inference
+  labels:
+    model: phi-3-mini-128k
+    tier: budget
+resource:
+  instanceType: "Standard_NC8as_T4_v3"
+  labelSelector:
+    matchLabels:
+      apps: phi3-mini-inference
+inference:
+  preset:
+    name: phi-3-mini-128k-instruct
+  config: "phi3-vllm-config"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: phi3-vllm-config
+  namespace: inference
+data:
+  inference_config.yaml: |
+    vllm:
+      gpu-memory-utilization: 0.90
+      max-model-len: 8192   # Keep lower than 128K to avoid OOM on T4
+      max-num-seqs: 32
+      dtype: "float16"
