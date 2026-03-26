@@ -14,16 +14,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install Checkov
+        run: pip install checkov --quiet
+
       - name: Run Checkov
-        uses: bridgecrewio/checkov-action@master
-        with:
-          directory: .
-          framework: terraform,kubernetes
-          soft_fail: false
-          output_format: cli
-          skip_check: >-
-            CKV_AZURE_7,
-            CKV_AZURE_141
+        run: |
+          checkov \
+            --directory . \
+            --framework terraform kubernetes \
+            --output cli \
+            --skip-check CKV_AZURE_7,CKV_AZURE_141 \
+            --quiet
 
   trivy:
     name: Trivy (Secret + Misconfiguration scan)
