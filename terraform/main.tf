@@ -451,6 +451,7 @@ resource "azurerm_network_security_group" "apim" {
   location            = azurerm_resource_group.lab.location
   tags                = var.tags
 
+  # ── Inbound (required by Azure for APIM VNet injection) ──────────────────
   security_rule {
     name                       = "AllowAPIMManagement"
     priority                   = 100
@@ -475,6 +476,7 @@ resource "azurerm_network_security_group" "apim" {
     destination_address_prefix = "VirtualNetwork"
   }
 
+  # External mode: gateway must be reachable from AFD (restrict to AFD tag only)
   security_rule {
     name                       = "AllowFrontDoor"
     priority                   = 120
@@ -482,9 +484,70 @@ resource "azurerm_network_security_group" "apim" {
     access                     = "Allow"
     protocol                   = "Tcp"
     source_port_range          = "*"
-    destination_port_range     = "443"
+    destination_port_ranges    = ["80", "443"]
     source_address_prefix      = "AzureFrontDoor.Backend"
     destination_address_prefix = "VirtualNetwork"
+  }
+
+  # ── Outbound (required for APIM activation / runtime) ────────────────────
+  security_rule {
+    name                       = "AllowStorageOutbound"
+    priority                   = 100
+    direction                  = "Outbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_range     = "443"
+    source_address_prefix      = "VirtualNetwork"
+    destination_address_prefix = "Storage"
+  }
+
+  security_rule {
+    name                       = "AllowSQLOutbound"
+    priority                   = 110
+    direction                  = "Outbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_range     = "1433"
+    source_address_prefix      = "VirtualNetwork"
+    destination_address_prefix = "Sql"
+  }
+
+  security_rule {
+    name                       = "AllowAADOutbound"
+    priority                   = 120
+    direction                  = "Outbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_range     = "443"
+    source_address_prefix      = "VirtualNetwork"
+    destination_address_prefix = "AzureActiveDirectory"
+  }
+
+  security_rule {
+    name                       = "AllowEventHubOutbound"
+    priority                   = 130
+    direction                  = "Outbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_ranges    = ["5671", "5672", "443"]
+    source_address_prefix      = "VirtualNetwork"
+    destination_address_prefix = "EventHub"
+  }
+
+  security_rule {
+    name                       = "AllowMonitorOutbound"
+    priority                   = 140
+    direction                  = "Outbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_ranges    = ["443", "1886"]
+    source_address_prefix      = "VirtualNetwork"
+    destination_address_prefix = "AzureMonitor"
   }
 }
 
