@@ -1148,41 +1148,13 @@ locals {
   # This fragment is intentionally empty.
   _quota_fragment = ""
 
-  # Token chargeback outbound fragment.
-  # Parses usage tokens from the response body and emits a trace to App Insights.
-  # Queryable in Log Analytics as AppTraces (source = "token-chargeback").
-  # Skipped for streaming requests (cache-key is null) and cache hits (which
-  # return early in inbound and never reach the outbound section).
-  _chargeback_fragment = trimspace(<<-FRAG
-        <!--
-          Cost chargeback: log token usage per subscription/product to App Insights.
-          Only fires for live, non-streaming backend responses (status 200).
-          Log Analytics query:
-            AppTraces | where Properties.source == "token-chargeback"
-            | extend d = parse_json(Message)
-            | summarize TotalTokens = sum(toint(d.tt))
-                by Subscription = tostring(d.sub), Product = tostring(d.pid)
-        -->
-        <choose>
-          <when condition="@(context.Response.StatusCode == 200 &amp;&amp; context.Variables[&quot;cache-key&quot;] != null)">
-            <trace source="token-chargeback" severity="information">
-              <message>@{
-                try {
-                  var resp = context.Response.Body.As&lt;JObject&gt;(preserveContent: true);
-                  var u = resp?["usage"];
-                  return "{\"sub\":\"" + (context.Subscription?.Id ?? "anon") +
-                         "\",\"pid\":\"" + (context.Product?.Id ?? "none") +
-                         "\",\"pt\":"  + (u?["prompt_tokens"]?.Value&lt;int&gt;()     ?? 0).ToString() +
-                         ",\"ct\":"    + (u?["completion_tokens"]?.Value&lt;int&gt;() ?? 0).ToString() +
-                         ",\"tt\":"    + (u?["total_tokens"]?.Value&lt;int&gt;()      ?? 0).ToString() +
-                         ",\"mod\":\"" + (resp?["model"]?.ToString() ?? "unknown") + "\"}";
-                } catch { return "{}"; }
-              }</message>
-            </trace>
-          </when>
-        </choose>
-  FRAG
-  )
+  # Token chargeback is handled by the App Insights diagnostic (see
+  # azurerm_api_management_api_diagnostic.inference below) which logs the
+  # backend response body. The usage.total_tokens field is captured there
+  # and queryable via the KQL in the token_chargeback_query output.
+  # The trace policy is intentionally omitted — it requires a confirmed active
+  # diagnostic at policy-save time and causes a 400 before the diagnostic settles.
+  _chargeback_fragment = ""
 
   apim_policy_simple = <<-XML
     <policies>
@@ -1418,14 +1390,16 @@ resource "azurerm_api_management_api_diagnostic" "inference" {
     headers_to_log = ["x-cache", "x-inference-backend", "content-type"]
   }
 
-  # Do not log request/response bodies here — the policy trace already extracts
-  # and emits the structured token usage payload to keep App Insights lean.
   backend_request {
     body_bytes = 0
   }
 
+  # Capture enough of the backend response to include the usage object.
+  # OpenAI-format responses: usage fields appear near the end of the JSON.
+  # 2048 bytes captures the usage block for typical responses; increase if
+  # responses are large and usage is being truncated.
   backend_response {
-    body_bytes = 0
+    body_bytes = 2048
   }
 }
 

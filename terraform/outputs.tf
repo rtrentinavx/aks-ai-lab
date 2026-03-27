@@ -101,18 +101,25 @@ output "app_insights_instrumentation_key" {
 
 output "token_chargeback_query" {
   value       = <<-KQL
-    // Token chargeback per subscription and product (run in Log Analytics)
-    AppTraces
+    // Token chargeback per subscription (run in Log Analytics workspace)
+    // Source: APIM backend response body logged by App Insights diagnostic
+    AppDependencies
     | where AppRoleName == "${var.cluster_name}-apim"
-    | where Message startswith "{"
-    | extend d = parse_json(Message)
-    | where isnotempty(d.sub)
+    | where Success == true
+    | extend body = parse_json(Properties["responseBody"])
+    | where isnotempty(body.usage)
+    | extend
+        SubscriptionId   = tostring(Properties["subscriptionId"]),
+        PromptTokens     = toint(body.usage.prompt_tokens),
+        CompletionTokens = toint(body.usage.completion_tokens),
+        TotalTokens      = toint(body.usage.total_tokens),
+        Model            = tostring(body.model)
     | summarize
-        PromptTokens     = sum(toint(d.pt)),
-        CompletionTokens = sum(toint(d.ct)),
-        TotalTokens      = sum(toint(d.tt))
-      by SubscriptionId = tostring(d.sub), ProductId = tostring(d.pid), Model = tostring(d.mod)
+        PromptTokens     = sum(PromptTokens),
+        CompletionTokens = sum(CompletionTokens),
+        TotalTokens      = sum(TotalTokens)
+      by SubscriptionId, Model
     | order by TotalTokens desc
   KQL
-  description = "KQL query to run in Log Analytics for per-team token chargeback reporting"
+  description = "KQL query to run in Log Analytics for per-subscription token chargeback reporting"
 }
