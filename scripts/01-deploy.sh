@@ -57,7 +57,7 @@ KEDA_CLIENT_ID=$(terraform output -raw keda_identity_client_id)
 ALB_CLIENT_ID=$(terraform output -raw alb_identity_client_id)
 AGFC_SUBNET_ID=$(terraform output -raw agfc_subnet_id)
 KV_NAME=$(terraform output -raw key_vault_uri | sed 's|https://||' | sed 's|.vault.azure.net/||')
-SB_NAMESPACE=$(terraform output -raw servicebus_namespace)
+SB_NAMESPACE=$(terraform output -raw servicebus_namespace 2>/dev/null || echo "")
 TENANT_ID=$(az account show --query tenantId -o tsv)
 
 echo "  Cluster: $CLUSTER_NAME | RG: $RG_NAME"
@@ -264,5 +264,5 @@ echo "  KAITO_CLIENT_ID    = $KAITO_CLIENT_ID"
 echo "  ALB_CLIENT_ID      = $ALB_CLIENT_ID"
 echo "  AGFC_SUBNET_ID     = $AGFC_SUBNET_ID"
 echo "  KEY_VAULT_NAME     = $KV_NAME"
-echo "  SB_NAMESPACE       = $SB_NAMESPACE"
+[[ -n "$SB_NAMESPACE" ]] && echo "  SB_NAMESPACE       = $SB_NAMESPACE" || echo "  SB_NAMESPACE       = (disabled — set enable_service_bus=true to deploy)"
 echo "  TENANT_ID          = $TENANT_ID"
