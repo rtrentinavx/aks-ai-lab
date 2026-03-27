@@ -29,10 +29,11 @@ check_tool() {
 }
 
 check_tool az        "2.65+"
-check_tool kubectl   "1.29+"  "version --client"
-check_tool helm      "3.14+"
-check_tool terraform "1.7+"
-check_tool jq        "1.6+"
+check_tool kubectl    "1.29+"  "version --client"
+check_tool kubelogin  "0.1+"   "--version"
+check_tool helm       "3.14+"
+check_tool terraform  "1.7+"
+check_tool jq         "1.6+"
 
 # ── Azure login ────────────────────────────────────────────────
 echo -e "\n[2/4] Checking Azure login..."

@@ -64,6 +64,19 @@ echo "  Cluster: $CLUSTER_NAME | RG: $RG_NAME"
 
 # ── Step 2: kubeconfig ────────────────────────────────────────
 echo -e "\n[2/8] Fetching kubeconfig..."
+
+# kubelogin is required for AAD-enabled clusters (azure_active_directory_role_based_access_control).
+# az aks get-credentials writes a kubeconfig that references kubelogin as a credential plugin.
+if ! command -v kubelogin &>/dev/null; then
+  echo "  Installing kubelogin (required for AAD-enabled AKS)..."
+  if command -v brew &>/dev/null; then
+    brew install Azure/kubelogin/kubelogin
+  else
+    # Linux fallback
+    az aks install-cli 2>/dev/null || true
+  fi
+fi
+
 for attempt in 1 2 3; do
   if az aks get-credentials \
       --resource-group "$RG_NAME" \
@@ -75,6 +88,9 @@ for attempt in 1 2 3; do
   sleep 30
   [[ $attempt -eq 3 ]] && { echo "ERROR: could not fetch kubeconfig after 3 attempts"; exit 1; }
 done
+
+# Convert kubeconfig to use Azure CLI auth (no interactive browser popup in CI).
+kubelogin convert-kubeconfig -l azurecli
 
 kubectl get nodes
 

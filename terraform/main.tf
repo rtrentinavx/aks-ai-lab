@@ -562,10 +562,20 @@ resource "azurerm_key_vault" "lab" {
   }
 }
 
-# Grant current operator access
+# Grant current operator access to Key Vault
 resource "azurerm_role_assignment" "kv_operator" {
   scope                = azurerm_key_vault.lab.id
   role_definition_name = "Key Vault Secrets Officer"
+  principal_id         = data.azurerm_client_config.current.object_id
+}
+
+# Grant current operator kubectl access via Azure RBAC.
+# Required when azure_active_directory_role_based_access_control is enabled —
+# local kubeconfig credentials are no longer sufficient; kubelogin + this
+# role assignment is needed to run kubectl commands.
+resource "azurerm_role_assignment" "aks_operator_admin" {
+  scope                = azurerm_kubernetes_cluster.lab.id
+  role_definition_name = "Azure Kubernetes Service RBAC Cluster Admin"
   principal_id         = data.azurerm_client_config.current.object_id
 }
 
