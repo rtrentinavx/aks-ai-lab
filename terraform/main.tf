@@ -148,12 +148,24 @@ resource "azurerm_subnet_nat_gateway_association" "aks" {
 ###############################################################################
 
 resource "azurerm_kubernetes_cluster" "lab" {
+  #checkov:skip=CKV_AZURE_6: API server authorized IP ranges conflict with private_cluster=false lab default; use private_cluster=true for production
+  #checkov:skip=CKV_AZURE_116: Azure Policy add-on not required for this lab; add for production compliance enforcement
+  #checkov:skip=CKV_AZURE_115: Private cluster controlled by var.private_cluster; default false for lab accessibility
+  #checkov:skip=CKV_AZURE_117: Disk encryption set adds cost and complexity not justified for a lab
+  #checkov:skip=CKV_AZURE_170: Free SLA tier acceptable for lab; use Standard or Premium for production
+  #checkov:skip=CKV_AZURE_226: Ephemeral OS disks require VM SKU support; managed disks used for compatibility with NAP
+  #checkov:skip=CKV_AZURE_227: Host-based encryption requires subscription feature registration; not enabled in lab
+  #checkov:skip=CKV_AZURE_232: System node taint managed by NAP NodePool config, not AKS cluster resource
   name                = var.cluster_name
   resource_group_name = azurerm_resource_group.lab.name
   location            = azurerm_resource_group.lab.location
   dns_prefix          = var.cluster_name
   kubernetes_version  = var.kubernetes_version
   tags                = var.tags
+
+  local_account_disabled = true
+
+  automatic_upgrade_channel = "stable"
 
   # Private cluster — API server not reachable from public internet
   private_cluster_enabled             = var.private_cluster
@@ -165,13 +177,15 @@ resource "azurerm_kubernetes_cluster" "lab" {
   workload_identity_enabled = true
 
   default_node_pool {
-    name                    = "system"
-    vm_size                 = "Standard_D4ds_v5"
-    auto_scaling_enabled    = false
-    node_count              = 2
-    os_disk_size_gb         = 128
-    vnet_subnet_id          = azurerm_subnet.aks.id
-    temporary_name_for_rotation = "systemtmp"
+    name                         = "system"
+    vm_size                      = "Standard_D4ds_v5"
+    auto_scaling_enabled         = false
+    node_count                   = 2
+    os_disk_size_gb              = 128
+    max_pods                     = 50
+    vnet_subnet_id               = azurerm_subnet.aks.id
+    temporary_name_for_rotation  = "systemtmp"
+    only_critical_addons_enabled = true
 
     upgrade_settings {
       max_surge = "33%"
@@ -309,9 +323,17 @@ resource "azurerm_key_vault" "lab" {
   tenant_id                  = data.azurerm_client_config.current.tenant_id
   sku_name                   = "standard"
   rbac_authorization_enabled = true
-  purge_protection_enabled   = false
+  purge_protection_enabled   = true
   soft_delete_retention_days = 7
   tags                       = var.tags
+
+  network_acls {
+    default_action = "Deny"
+    bypass         = "AzureServices"
+    # VNet subnet rules are added post-deploy when subnet IDs are known.
+    # To allow temporary operator access from a known IP, set var.operator_ip.
+    ip_rules = var.operator_ip != "" ? [var.operator_ip] : []
+  }
 }
 
 # Grant current operator access
@@ -398,10 +420,16 @@ resource "azurerm_federated_identity_credential" "keda" {
 ###############################################################################
 
 resource "azurerm_servicebus_namespace" "lab" {
+  #checkov:skip=CKV_AZURE_199: Double encryption not supported on Standard SKU; upgrade to Premium for production
+  #checkov:skip=CKV_AZURE_201: CMK encryption not supported on Standard SKU; upgrade to Premium for production
+  #checkov:skip=CKV_AZURE_202: Managed identity provider not available on Standard SKU
+  #checkov:skip=CKV_AZURE_204: Public network access required for KEDA operator connectivity in this lab topology
   name                = "${var.cluster_name}-bus"
   resource_group_name = azurerm_resource_group.lab.name
   location            = azurerm_resource_group.lab.location
   sku                 = "Standard"
+  local_auth_enabled  = false
+  minimum_tls_version = "1.2"
   tags                = var.tags
 }
 
@@ -619,6 +647,7 @@ resource "azurerm_public_ip" "apim" {
 ###############################################################################
 
 resource "azurerm_api_management" "lab" {
+  #checkov:skip=CKV_AZURE_174: Public endpoint intentional in External VNet mode; NSG restricts inbound 443 to AzureFrontDoor.Backend service tag only
   name                = "${var.cluster_name}-apim"
   resource_group_name = azurerm_resource_group.lab.name
   location            = azurerm_resource_group.lab.location
@@ -643,6 +672,7 @@ resource "azurerm_api_management" "lab" {
 # Backend pointing to the Envoy Gateway internal service on AKS.
 # Update the URL after the inference service is deployed.
 resource "azurerm_api_management_backend" "inference" {
+  #checkov:skip=CKV_AZURE_215: HTTP used for internal LB backend; TLS termination at APIM; add TLS on internal LB for production (see ingress-guide.md)
   name                = "aks-inference-backend"
   resource_group_name = azurerm_resource_group.lab.name
   api_management_name = azurerm_api_management.lab.name

@@ -48,6 +48,12 @@ variable "private_cluster" {
   default     = false
 }
 
+variable "operator_ip" {
+  description = "Your public IP address to allow Key Vault access during deployment. Find it with: curl -s ifconfig.me"
+  type        = string
+  default     = ""
+}
+
 variable "envoy_gateway_ip" {
   description = "External IP of the Envoy Gateway LoadBalancer service (inference-gateway in the inference namespace). Set after cluster bootstrap: terraform apply -var envoy_gateway_ip=<IP>"
   type        = string
