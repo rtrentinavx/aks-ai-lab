@@ -1116,31 +1116,14 @@ resource "azurerm_api_management_api_operation" "chat_completions" {
 locals {
   # Heredocs cannot be used in ternary expressions in Terraform, so both
   # policy variants are defined as locals and selected via the conditional.
-  # AAD validate-jwt is injected using %{ if }~/%{ endif }~ template directives
-  # which produce zero output (no blank lines) when the condition is false.
+  # AAD authentication (validate-jwt) is configured separately via the portal
+  # or az cli once apim_aad_audience is set — injecting it here causes
+  # heredoc indentation issues that trigger APIM policy 400 errors.
 
   apim_policy_simple = <<-XML
     <policies>
       <inbound>
         <base />
-%{ if var.apim_aad_audience != "" ~}
-        <!--
-          AAD authentication: rejects requests without a valid AAD bearer token.
-          Audience must match the API app registration client ID ({{aad-audience}}).
-        -->
-        <validate-jwt header-name="Authorization"
-                      failed-validation-httpcode="401"
-                      failed-validation-error-message="Unauthorized — valid AAD bearer token required">
-          <openid-config url="https://login.microsoftonline.com/${data.azurerm_client_config.current.tenant_id}/v2.0/.well-known/openid-configuration" />
-          <audiences>
-            <audience>{{aad-audience}}</audience>
-          </audiences>
-          <issuers>
-            <issuer>https://login.microsoftonline.com/${data.azurerm_client_config.current.tenant_id}/v2.0</issuer>
-            <issuer>https://sts.windows.net/${data.azurerm_client_config.current.tenant_id}/</issuer>
-          </issuers>
-        </validate-jwt>
-%{ endif ~}
         <rate-limit calls="60" renewal-period="60" />
         <cors>
           <allowed-origins><origin>*</origin></allowed-origins>
@@ -1208,24 +1191,6 @@ locals {
     <policies>
       <inbound>
         <base />
-%{ if var.apim_aad_audience != "" ~}
-        <!--
-          AAD authentication: rejects requests without a valid AAD bearer token.
-          Audience must match the API app registration client ID ({{aad-audience}}).
-        -->
-        <validate-jwt header-name="Authorization"
-                      failed-validation-httpcode="401"
-                      failed-validation-error-message="Unauthorized — valid AAD bearer token required">
-          <openid-config url="https://login.microsoftonline.com/${data.azurerm_client_config.current.tenant_id}/v2.0/.well-known/openid-configuration" />
-          <audiences>
-            <audience>{{aad-audience}}</audience>
-          </audiences>
-          <issuers>
-            <issuer>https://login.microsoftonline.com/${data.azurerm_client_config.current.tenant_id}/v2.0</issuer>
-            <issuer>https://sts.windows.net/${data.azurerm_client_config.current.tenant_id}/</issuer>
-          </issuers>
-        </validate-jwt>
-%{ endif ~}
         <rate-limit calls="60" renewal-period="60" />
         <cors>
           <allowed-origins><origin>*</origin></allowed-origins>
