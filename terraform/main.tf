@@ -1158,31 +1158,30 @@ locals {
         <choose>
           <when condition="@(context.Product?.Id == &quot;finance&quot;)">
             <quota-by-key calls="${var.finance_monthly_calls}" renewal-period="2592000"
-                          counter-key="@(context.Subscription.Id)" />
+                          counter-key="@(context.Subscription?.Id ?? &quot;anon&quot;)" />
           </when>
           <when condition="@(context.Product?.Id == &quot;dev&quot;)">
             <quota-by-key calls="${var.dev_monthly_calls}" renewal-period="2592000"
-                          counter-key="@(context.Subscription.Id)" />
+                          counter-key="@(context.Subscription?.Id ?? &quot;anon&quot;)" />
           </when>
         </choose>
   FRAG
   )
 
   # Token chargeback outbound fragment.
-  # Parses usage.total_tokens from the response body and emits two signals:
-  #   1. trace → App Insights customEvents (queryable in Log Analytics for billing)
-  #   2. emit-metric → Azure Monitor custom metrics (alertable, dashboardable)
-  # Skipped for cache hits (cache-key == null means streaming was detected or
-  # a cache hit short-circuited inbound; we only log live backend responses).
+  # Parses usage tokens from the response body and emits a trace to App Insights.
+  # Queryable in Log Analytics as AppTraces (source = "token-chargeback").
+  # Skipped for streaming requests (cache-key is null) and cache hits (which
+  # return early in inbound and never reach the outbound section).
   _chargeback_fragment = trimspace(<<-FRAG
         <!--
-          Cost chargeback: emit token usage per subscription and product.
-          Skipped for cached responses (no backend call was made).
-          Query in Log Analytics:
-            AppTraces
-            | where Message startswith "{"
+          Cost chargeback: log token usage per subscription/product to App Insights.
+          Only fires for live, non-streaming backend responses (status 200).
+          Log Analytics query:
+            AppTraces | where Properties.source == "token-chargeback"
             | extend d = parse_json(Message)
-            | summarize sum(toint(d.tt)) by tostring(d.sub), tostring(d.pid)
+            | summarize TotalTokens = sum(toint(d.tt))
+                by Subscription = tostring(d.sub), Product = tostring(d.pid)
         -->
         <choose>
           <when condition="@(context.Response.StatusCode == 200 &amp;&amp; context.Variables[&quot;cache-key&quot;] != null)">
@@ -1190,27 +1189,16 @@ locals {
               <message>@{
                 try {
                   var resp = context.Response.Body.As&lt;JObject&gt;(preserveContent: true);
-                  return new Newtonsoft.Json.Linq.JObject {
-                    ["sub"] = context.Subscription?.Id ?? "anon",
-                    ["pid"] = context.Product?.Id    ?? "none",
-                    ["pt"]  = resp?["usage"]?["prompt_tokens"]?.Value&lt;int&gt;()     ?? 0,
-                    ["ct"]  = resp?["usage"]?["completion_tokens"]?.Value&lt;int&gt;() ?? 0,
-                    ["tt"]  = resp?["usage"]?["total_tokens"]?.Value&lt;int&gt;()      ?? 0,
-                    ["mod"] = resp?["model"]?.ToString() ?? "unknown"
-                  }.ToString();
+                  var u = resp?["usage"];
+                  return "{\"sub\":\"" + (context.Subscription?.Id ?? "anon") +
+                         "\",\"pid\":\"" + (context.Product?.Id ?? "none") +
+                         "\",\"pt\":"  + (u?["prompt_tokens"]?.Value&lt;int&gt;()     ?? 0).ToString() +
+                         ",\"ct\":"    + (u?["completion_tokens"]?.Value&lt;int&gt;() ?? 0).ToString() +
+                         ",\"tt\":"    + (u?["total_tokens"]?.Value&lt;int&gt;()      ?? 0).ToString() +
+                         ",\"mod\":\"" + (resp?["model"]?.ToString() ?? "unknown") + "\"}";
                 } catch { return "{}"; }
               }</message>
             </trace>
-            <emit-metric name="InferenceTokenUsage" namespace="APIM/Chargeback"
-                         value="@{
-              try {
-                var resp = context.Response.Body.As&lt;JObject&gt;(preserveContent: true);
-                return (double)(resp?["usage"]?["total_tokens"]?.Value&lt;int&gt;() ?? 0);
-              } catch { return 0.0; }
-            }">
-              <dimension name="SubscriptionId" value="@(context.Subscription?.Id ?? &quot;anonymous&quot;)" />
-              <dimension name="ProductId"      value="@(context.Product?.Id     ?? &quot;none&quot;)" />
-            </emit-metric>
           </when>
         </choose>
   FRAG
