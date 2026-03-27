@@ -100,6 +100,142 @@ resource "azurerm_subnet" "aks" {
   address_prefixes     = ["10.240.0.0/16"]
 }
 
+# NSG for the AKS subnet.
+# Locks down the Envoy Gateway LoadBalancer (port 80) to APIM + operator only.
+# All other internet inbound is denied at priority 4000.
+resource "azurerm_network_security_group" "aks" {
+  name                = "${var.cluster_name}-aks-nsg"
+  resource_group_name = azurerm_resource_group.lab.name
+  location            = azurerm_resource_group.lab.location
+  tags                = var.tags
+
+  # ── Inbound ──────────────────────────────────────────────────────────────
+
+  # AKS control plane → nodes (required for managed AKS)
+  security_rule {
+    name                       = "AllowAKSControlPlane"
+    priority                   = 100
+    direction                  = "Inbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_ranges    = ["443", "10250"]
+    source_address_prefix      = "AzureCloud"
+    destination_address_prefix = "VirtualNetwork"
+  }
+
+  # Azure Load Balancer health probes (required)
+  security_rule {
+    name                       = "AllowAzureLoadBalancer"
+    priority                   = 110
+    direction                  = "Inbound"
+    access                     = "Allow"
+    protocol                   = "*"
+    source_port_range          = "*"
+    destination_port_range     = "*"
+    source_address_prefix      = "AzureLoadBalancer"
+    destination_address_prefix = "VirtualNetwork"
+  }
+
+  # Intra-VNet (pod-to-pod, node-to-node, APIM → Envoy)
+  security_rule {
+    name                       = "AllowVnetInbound"
+    priority                   = 120
+    direction                  = "Inbound"
+    access                     = "Allow"
+    protocol                   = "*"
+    source_port_range          = "*"
+    destination_port_range     = "*"
+    source_address_prefix      = "VirtualNetwork"
+    destination_address_prefix = "VirtualNetwork"
+  }
+
+  # Operator IP — port 80 direct access to Envoy Gateway for testing
+  security_rule {
+    name                       = "AllowOperatorHTTP"
+    priority                   = 200
+    direction                  = "Inbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_range     = "80"
+    source_address_prefix      = "${var.operator_ip}/32"
+    destination_address_prefix = "VirtualNetwork"
+  }
+
+  # Block all other internet inbound
+  security_rule {
+    name                       = "DenyInternetInbound"
+    priority                   = 4000
+    direction                  = "Inbound"
+    access                     = "Deny"
+    protocol                   = "*"
+    source_port_range          = "*"
+    destination_port_range     = "*"
+    source_address_prefix      = "Internet"
+    destination_address_prefix = "VirtualNetwork"
+  }
+
+  # ── Outbound ─────────────────────────────────────────────────────────────
+
+  # AKS nodes → API server + Azure services
+  security_rule {
+    name                       = "AllowAKSAPIServer"
+    priority                   = 100
+    direction                  = "Outbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_range     = "443"
+    source_address_prefix      = "VirtualNetwork"
+    destination_address_prefix = "AzureCloud"
+  }
+
+  # Container image pulls (ACR, MCR, Docker Hub via internet)
+  security_rule {
+    name                       = "AllowContainerRegistryOutbound"
+    priority                   = 110
+    direction                  = "Outbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_ranges    = ["443", "80"]
+    source_address_prefix      = "VirtualNetwork"
+    destination_address_prefix = "Internet"
+  }
+
+  # Azure Monitor / Log Analytics
+  security_rule {
+    name                       = "AllowMonitorOutbound"
+    priority                   = 120
+    direction                  = "Outbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_ranges    = ["443", "1886"]
+    source_address_prefix      = "VirtualNetwork"
+    destination_address_prefix = "AzureMonitor"
+  }
+
+  # Intra-VNet outbound (pods, services, KEDA → Service Bus, etc.)
+  security_rule {
+    name                       = "AllowVnetOutbound"
+    priority                   = 130
+    direction                  = "Outbound"
+    access                     = "Allow"
+    protocol                   = "*"
+    source_port_range          = "*"
+    destination_port_range     = "*"
+    source_address_prefix      = "VirtualNetwork"
+    destination_address_prefix = "VirtualNetwork"
+  }
+}
+
+resource "azurerm_subnet_network_security_group_association" "aks" {
+  subnet_id                 = azurerm_subnet.aks.id
+  network_security_group_id = azurerm_network_security_group.aks.id
+}
+
 ###############################################################################
 # NAT Gateway — centralized egress for all cluster nodes
 ###############################################################################
@@ -284,6 +420,8 @@ resource "azurerm_dashboard_grafana" "lab" {
   resource_group_name               = azurerm_resource_group.lab.name
   location                          = azurerm_resource_group.lab.location
   grafana_major_version             = 11
+  # Public access is required; access control is enforced via Azure AD RBAC
+  # (Grafana Admin role assignment below). Managed Grafana has no IP firewall.
   public_network_access_enabled     = true
   zone_redundancy_enabled           = false
 
@@ -551,6 +689,32 @@ resource "azurerm_network_security_group" "apim" {
     source_port_range          = "*"
     destination_port_ranges    = ["80", "443"]
     source_address_prefix      = "AzureFrontDoor.Backend"
+    destination_address_prefix = "VirtualNetwork"
+  }
+
+  # Operator IP — direct APIM portal access and API testing
+  security_rule {
+    name                       = "AllowOperatorHTTPS"
+    priority                   = 130
+    direction                  = "Inbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_range     = "443"
+    source_address_prefix      = "${var.operator_ip}/32"
+    destination_address_prefix = "VirtualNetwork"
+  }
+
+  # Deny all other internet inbound
+  security_rule {
+    name                       = "DenyInternetInbound"
+    priority                   = 4000
+    direction                  = "Inbound"
+    access                     = "Deny"
+    protocol                   = "*"
+    source_port_range          = "*"
+    destination_port_range     = "*"
+    source_address_prefix      = "Internet"
     destination_address_prefix = "VirtualNetwork"
   }
 

@@ -49,9 +49,13 @@ variable "private_cluster" {
 }
 
 variable "operator_ip" {
-  description = "Your public IP address to allow Key Vault access during deployment. Find it with: curl -s ifconfig.me"
+  description = "Your public IPv4 address. Required — used in NSG rules and Key Vault ACL. Find it with: curl -s -4 ifconfig.me"
   type        = string
-  default     = ""
+
+  validation {
+    condition     = can(regex("^(\\d{1,3}\\.){3}\\d{1,3}$", var.operator_ip))
+    error_message = "operator_ip must be a valid IPv4 address (e.g. 23.124.126.28)."
+  }
 }
 
 variable "envoy_gateway_ip" {
