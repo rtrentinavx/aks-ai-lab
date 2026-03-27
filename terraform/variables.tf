@@ -64,6 +64,12 @@ variable "envoy_gateway_ip" {
   default     = ""
 }
 
+variable "enable_service_bus" {
+  description = "Deploy Azure Service Bus and configure KEDA Service Bus trigger authentication. Set to true to enable async inference via queue. Default false — HTTP-based KEDA scaling works without it."
+  type        = bool
+  default     = false
+}
+
 variable "tags" {
   description = "Resource tags"
   type        = map(string)

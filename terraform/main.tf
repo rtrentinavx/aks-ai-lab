@@ -178,9 +178,11 @@ resource "azurerm_network_security_group" "aks" {
 
   # ── Outbound ─────────────────────────────────────────────────────────────
 
-  # AKS nodes → API server + Azure services
+  # ── Outbound — Azure service tags ────────────────────────────────────────
+
+  # AKS nodes → API server, OIDC issuer, Azure management plane
   security_rule {
-    name                       = "AllowAKSAPIServer"
+    name                       = "AllowAzureCloud"
     priority                   = 100
     direction                  = "Outbound"
     access                     = "Allow"
@@ -191,22 +193,22 @@ resource "azurerm_network_security_group" "aks" {
     destination_address_prefix = "AzureCloud"
   }
 
-  # Container image pulls (ACR, MCR, Docker Hub via internet)
+  # MCR (mcr.microsoft.com) + ACR (*.azurecr.io) — KAITO model images, ALB controller
   security_rule {
-    name                       = "AllowContainerRegistryOutbound"
+    name                       = "AllowAzureContainerRegistry"
     priority                   = 110
     direction                  = "Outbound"
     access                     = "Allow"
     protocol                   = "Tcp"
     source_port_range          = "*"
-    destination_port_ranges    = ["443", "80"]
+    destination_port_range     = "443"
     source_address_prefix      = "VirtualNetwork"
-    destination_address_prefix = "Internet"
+    destination_address_prefix = "AzureContainerRegistry"
   }
 
-  # Azure Monitor / Log Analytics
+  # Azure Monitor + Log Analytics (*.ods.opinsights.azure.com, *.monitoring.azure.com)
   security_rule {
-    name                       = "AllowMonitorOutbound"
+    name                       = "AllowAzureMonitor"
     priority                   = 120
     direction                  = "Outbound"
     access                     = "Allow"
@@ -217,10 +219,62 @@ resource "azurerm_network_security_group" "aks" {
     destination_address_prefix = "AzureMonitor"
   }
 
-  # Intra-VNet outbound (pods, services, KEDA → Service Bus, etc.)
+  # Key Vault (*.vault.azure.net) — Secrets Store CSI, Workload Identity
+  security_rule {
+    name                       = "AllowAzureKeyVault"
+    priority                   = 130
+    direction                  = "Outbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_range     = "443"
+    source_address_prefix      = "VirtualNetwork"
+    destination_address_prefix = "AzureKeyVault"
+  }
+
+  # Azure Active Directory (login.microsoftonline.com) — Workload Identity OIDC token exchange
+  security_rule {
+    name                       = "AllowAzureActiveDirectory"
+    priority                   = 140
+    direction                  = "Outbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_range     = "443"
+    source_address_prefix      = "VirtualNetwork"
+    destination_address_prefix = "AzureActiveDirectory"
+  }
+
+  # Service Bus (*.servicebus.windows.net) — KEDA Service Bus trigger
+  security_rule {
+    name                       = "AllowServiceBus"
+    priority                   = 150
+    direction                  = "Outbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_ranges    = ["443", "5671", "5672"]
+    source_address_prefix      = "VirtualNetwork"
+    destination_address_prefix = "ServiceBus"
+  }
+
+  # Azure Storage (*.blob.core.windows.net) — Terraform state, AKS bootstrap
+  security_rule {
+    name                       = "AllowStorage"
+    priority                   = 160
+    direction                  = "Outbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_range     = "443"
+    source_address_prefix      = "VirtualNetwork"
+    destination_address_prefix = "Storage"
+  }
+
+  # Intra-VNet (pod-to-pod, node-to-node, KEDA operator, Envoy, etc.)
   security_rule {
     name                       = "AllowVnetOutbound"
-    priority                   = 130
+    priority                   = 170
     direction                  = "Outbound"
     access                     = "Allow"
     protocol                   = "*"
@@ -228,6 +282,29 @@ resource "azurerm_network_security_group" "aks" {
     destination_port_range     = "*"
     source_address_prefix      = "VirtualNetwork"
     destination_address_prefix = "VirtualNetwork"
+  }
+
+  # ── Outbound — Internet (no Azure service tag available) ─────────────────
+  # Required FQDNs (FQDN-level filtering requires Azure Firewall):
+  #   docker.io, registry-1.docker.io  — vLLM image, python:3.12-slim, busybox
+  #   nvcr.io                          — NVIDIA DCGM exporter image
+  #   ghcr.io                          — KEDA HTTP add-on image
+  #   github.com, raw.githubusercontent.com, objects.githubusercontent.com
+  #                                    — Gateway API CRDs, Inference Extension manifests,
+  #                                      Helm chart indexes (kedacore, nvidia)
+  #   huggingface.co, cdn-lfs.huggingface.co
+  #                                    — Model weights (vLLM standalone only;
+  #                                      KAITO uses MCR-hosted images instead)
+  security_rule {
+    name                       = "AllowInternetEgress"
+    priority                   = 200
+    direction                  = "Outbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_range     = "443"
+    source_address_prefix      = "VirtualNetwork"
+    destination_address_prefix = "Internet"
   }
 }
 
@@ -558,6 +635,8 @@ resource "azurerm_federated_identity_credential" "keda" {
 ###############################################################################
 
 resource "azurerm_servicebus_namespace" "lab" {
+  count = var.enable_service_bus ? 1 : 0
+
   #checkov:skip=CKV_AZURE_199: Double encryption not supported on Standard SKU; upgrade to Premium for production
   #checkov:skip=CKV_AZURE_201: CMK encryption not supported on Standard SKU; upgrade to Premium for production
   #checkov:skip=CKV_AZURE_202: Managed identity provider not available on Standard SKU
@@ -572,8 +651,10 @@ resource "azurerm_servicebus_namespace" "lab" {
 }
 
 resource "azurerm_servicebus_queue" "inference" {
+  count = var.enable_service_bus ? 1 : 0
+
   name         = "inference-requests"
-  namespace_id = azurerm_servicebus_namespace.lab.id
+  namespace_id = azurerm_servicebus_namespace.lab[0].id
 
   max_size_in_megabytes = 1024
   lock_duration         = "PT1M"
@@ -581,19 +662,25 @@ resource "azurerm_servicebus_queue" "inference" {
 
 # Grant workload identity data access to Service Bus
 resource "azurerm_role_assignment" "sb_workload_sender" {
-  scope                = azurerm_servicebus_namespace.lab.id
+  count = var.enable_service_bus ? 1 : 0
+
+  scope                = azurerm_servicebus_namespace.lab[0].id
   role_definition_name = "Azure Service Bus Data Sender"
   principal_id         = azurerm_user_assigned_identity.workload.principal_id
 }
 
 resource "azurerm_role_assignment" "sb_workload_receiver" {
-  scope                = azurerm_servicebus_namespace.lab.id
+  count = var.enable_service_bus ? 1 : 0
+
+  scope                = azurerm_servicebus_namespace.lab[0].id
   role_definition_name = "Azure Service Bus Data Receiver"
   principal_id         = azurerm_user_assigned_identity.workload.principal_id
 }
 
 resource "azurerm_role_assignment" "sb_keda_receiver" {
-  scope                = azurerm_servicebus_namespace.lab.id
+  count = var.enable_service_bus ? 1 : 0
+
+  scope                = azurerm_servicebus_namespace.lab[0].id
   role_definition_name = "Azure Service Bus Data Owner"
   principal_id         = azurerm_user_assigned_identity.keda.principal_id
 }

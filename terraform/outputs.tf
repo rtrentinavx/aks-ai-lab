@@ -35,11 +35,11 @@ output "key_vault_uri" {
 }
 
 output "servicebus_namespace" {
-  value = azurerm_servicebus_namespace.lab.name
+  value = var.enable_service_bus ? azurerm_servicebus_namespace.lab[0].name : null
 }
 
 output "servicebus_fqdn" {
-  value = "${azurerm_servicebus_namespace.lab.name}.servicebus.windows.net"
+  value = var.enable_service_bus ? "${azurerm_servicebus_namespace.lab[0].name}.servicebus.windows.net" : null
 }
 
 output "apim_gateway_url" {
