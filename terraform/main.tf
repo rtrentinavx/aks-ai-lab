@@ -925,6 +925,10 @@ resource "azurerm_api_management" "lab" {
   tags = var.tags
 }
 
+###############################################################################
+# APIM Backends — vLLM (primary) + Azure AI Foundry (circuit breaker fallback)
+###############################################################################
+
 # Backend pointing to the Envoy Gateway internal service on AKS.
 # Update the URL after the inference service is deployed.
 resource "azurerm_api_management_backend" "inference" {
@@ -938,6 +942,33 @@ resource "azurerm_api_management_backend" "inference" {
   tls {
     validate_certificate_chain = false
     validate_certificate_name  = false
+  }
+}
+
+# Azure AI Foundry fallback backend — only created when enable_foundry_fallback = true.
+# The Foundry API key is stored in Key Vault as "foundry-api-key" and surfaced
+# into APIM as a Named Value so it never appears in policy XML.
+resource "azurerm_api_management_backend" "foundry" {
+  count               = var.enable_foundry_fallback ? 1 : 0
+  name                = "azure-foundry-backend"
+  resource_group_name = azurerm_resource_group.lab.name
+  api_management_name = azurerm_api_management.lab.name
+  protocol            = "http"
+  url                 = "${var.foundry_endpoint}/chat/completions?api-version=2024-08-01-preview"
+}
+
+# Named Value — pulls the Foundry API key from Key Vault at runtime.
+# APIM fetches the secret on each policy evaluation; the key never touches Terraform state.
+resource "azurerm_api_management_named_value" "foundry_api_key" {
+  count               = var.enable_foundry_fallback ? 1 : 0
+  name                = "foundry-api-key"
+  resource_group_name = azurerm_resource_group.lab.name
+  api_management_name = azurerm_api_management.lab.name
+  display_name        = "foundry-api-key"
+  secret              = true
+
+  value_from_key_vault {
+    secret_id = "${azurerm_key_vault.lab.vault_uri}secrets/foundry-api-key"
   }
 }
 
@@ -962,12 +993,11 @@ resource "azurerm_api_management_api_operation" "chat_completions" {
   url_template        = "/chat/completions"
 }
 
-resource "azurerm_api_management_api_policy" "inference" {
-  api_name            = azurerm_api_management_api.inference.name
-  resource_group_name = azurerm_resource_group.lab.name
-  api_management_name = azurerm_api_management.lab.name
+locals {
+  # Heredocs cannot be used in ternary expressions in Terraform, so both
+  # policy variants are defined as locals and selected via the conditional.
 
-  xml_content = <<-XML
+  apim_policy_simple = <<-XML
     <policies>
       <inbound>
         <base />
@@ -984,6 +1014,76 @@ resource "azurerm_api_management_api_policy" "inference" {
       <on-error><base /></on-error>
     </policies>
   XML
+
+  apim_policy_with_fallback = <<-XML
+    <policies>
+      <inbound>
+        <base />
+        <rate-limit calls="60" renewal-period="60" />
+        <cors>
+          <allowed-origins><origin>*</origin></allowed-origins>
+          <allowed-methods><method>POST</method><method>OPTIONS</method></allowed-methods>
+          <allowed-headers><header>*</header></allowed-headers>
+        </cors>
+        <set-variable name="vllm-attempted" value="@(false)" />
+        <set-backend-service backend-id="${azurerm_api_management_backend.inference.name}" />
+      </inbound>
+
+      <!--
+        Circuit breaker: attempt vLLM first. On 502/503/504, retry once against
+        Azure AI Foundry. If Foundry also fails the error is returned to the caller.
+
+        Triggers:
+          502 Bad Gateway         - Envoy cannot reach the vLLM pod (terminating, OOM)
+          503 Service Unavailable - KEDA scaled to zero, interceptor buffering timeout
+          504 Gateway Timeout     - vLLM generation exceeded the backend timeout
+
+        On failover the request is transparently rewritten for Foundry:
+          - Backend switched to azure-foundry-backend
+          - api-key header injected from the APIM Named Value (Key Vault reference)
+          - model field rewritten to the Foundry deployment name so the caller
+            does not need to know a fallback occurred
+      -->
+      <backend>
+        <retry condition="@(context.Response.StatusCode == 502 || context.Response.StatusCode == 503 || context.Response.StatusCode == 504)"
+               count="1" interval="0" first-fast-retry="true">
+          <choose>
+            <when condition="@((bool)context.Variables[&quot;vllm-attempted&quot;])">
+              <set-backend-service backend-id="azure-foundry-backend" />
+              <set-header name="api-key" exists-action="override">
+                <value>{{foundry-api-key}}</value>
+              </set-header>
+              <set-body>@{
+                var body = context.Request.Body.As&lt;JObject&gt;(preserveContent: true);
+                body["model"] = "${var.foundry_deployment}";
+                return body.ToString();
+              }</set-body>
+            </when>
+            <otherwise>
+              <set-variable name="vllm-attempted" value="@(true)" />
+            </otherwise>
+          </choose>
+          <forward-request timeout="180" />
+        </retry>
+      </backend>
+
+      <outbound>
+        <base />
+        <set-header name="X-Inference-Backend" exists-action="override">
+          <value>@((bool)context.Variables.GetValueOrDefault&lt;bool&gt;("vllm-attempted") ? "vllm" : "azure-foundry")</value>
+        </set-header>
+      </outbound>
+      <on-error><base /></on-error>
+    </policies>
+  XML
+}
+
+resource "azurerm_api_management_api_policy" "inference" {
+  api_name            = azurerm_api_management_api.inference.name
+  resource_group_name = azurerm_resource_group.lab.name
+  api_management_name = azurerm_api_management.lab.name
+
+  xml_content = var.enable_foundry_fallback ? local.apim_policy_with_fallback : local.apim_policy_simple
 }
 
 ###############################################################################

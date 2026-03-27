@@ -64,6 +64,24 @@ variable "envoy_gateway_ip" {
   default     = ""
 }
 
+variable "enable_foundry_fallback" {
+  description = "Deploy Azure AI Foundry backend and enable APIM circuit breaker failover. When vLLM returns 502/503/504 or times out, APIM retries the request against the Foundry deployment. Requires foundry_endpoint and foundry_deployment to be set."
+  type        = bool
+  default     = false
+}
+
+variable "foundry_endpoint" {
+  description = "Azure AI Foundry (Azure OpenAI) endpoint. Example: https://my-resource.openai.azure.com/openai/deployments/gpt-4o"
+  type        = string
+  default     = ""
+}
+
+variable "foundry_deployment" {
+  description = "Azure AI Foundry deployment name used in the fallback backend URL."
+  type        = string
+  default     = "gpt-4o"
+}
+
 variable "enable_service_bus" {
   description = "Deploy Azure Service Bus and configure KEDA Service Bus trigger authentication. Set to true to enable async inference via queue. Default false — HTTP-based KEDA scaling works without it."
   type        = bool
