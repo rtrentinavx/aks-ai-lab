@@ -415,11 +415,21 @@ resource "azurerm_kubernetes_cluster" "lab" {
     # and re-enable this to isolate system from user workloads.
 
     upgrade_settings {
-      # max_surge = "0" avoids provisioning surge nodes during node pool updates.
-      # AKS uses maxUnavailable=1 internally — one node drains at a time with no
-      # extra capacity needed. Required when vCPU quota is tight.
-      max_surge = "0"
+      max_surge = "33%"
     }
+  }
+
+  # Suppress the only_critical_addons_enabled change until vCPU quota allows
+  # a node pool rotation. The current live value is true; removing it requires
+  # AKS to drain/replace system nodes (surge node = 4 vCPUs needed).
+  # Workaround: KEDA HTTP add-on helm install includes CriticalAddonsOnly
+  # toleration so pods can still schedule on tainted system nodes.
+  # To apply: request standardDDSv5Family quota increase to ≥16 vCPUs in
+  # East US 2, then run: terraform apply -var operator_ip=...
+  lifecycle {
+    ignore_changes = [
+      default_node_pool[0].only_critical_addons_enabled,
+    ]
   }
 
   identity {
