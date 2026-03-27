@@ -82,6 +82,24 @@ variable "foundry_capacity" {
   default     = 10
 }
 
+variable "apim_aad_audience" {
+  description = "AAD app registration client ID used as the JWT audience for APIM validate-jwt. Set to the client ID of the API app registration. Leave empty to skip AAD authentication (not recommended for production)."
+  type        = string
+  default     = ""
+}
+
+variable "finance_monthly_calls" {
+  description = "Monthly call quota for the Finance product — used as a proxy for the 10M token budget (assumes ~100 tokens/call on average). renewal-period is 2592000s (30 days)."
+  type        = number
+  default     = 100000
+}
+
+variable "dev_monthly_calls" {
+  description = "Monthly call quota for the Dev product — used as a proxy for the 500K token budget (assumes ~100 tokens/call on average). renewal-period is 2592000s (30 days)."
+  type        = number
+  default     = 5000
+}
+
 variable "enable_service_bus" {
   description = "Deploy Azure Service Bus and configure KEDA Service Bus trigger authentication. Set to true to enable async inference via queue. Default false — HTTP-based KEDA scaling works without it."
   type        = bool

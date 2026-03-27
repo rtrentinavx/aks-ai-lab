@@ -500,6 +500,21 @@ resource "azurerm_log_analytics_workspace" "lab" {
 }
 
 ###############################################################################
+# Application Insights — APIM telemetry and token chargeback
+# Backed by the same Log Analytics workspace. Token usage events emitted by
+# the APIM trace policy are queryable in Log Analytics as customEvents.
+###############################################################################
+
+resource "azurerm_application_insights" "lab" {
+  name                = "${var.cluster_name}-appinsights"
+  resource_group_name = azurerm_resource_group.lab.name
+  location            = azurerm_resource_group.lab.location
+  workspace_id        = azurerm_log_analytics_workspace.lab.id
+  application_type    = "web"
+  tags                = var.tags
+}
+
+###############################################################################
 # Azure Monitor Workspace (Managed Prometheus)
 ###############################################################################
 
@@ -1101,11 +1116,112 @@ resource "azurerm_api_management_api_operation" "chat_completions" {
 locals {
   # Heredocs cannot be used in ternary expressions in Terraform, so both
   # policy variants are defined as locals and selected via the conditional.
+  # Sub-fragments are interpolated into each variant to avoid duplication.
+
+  # AAD JWT validation fragment — empty string when apim_aad_audience is not set.
+  # Authenticates the caller against AAD before any further processing.
+  # The audience ({{aad-audience}}) is stored as an APIM Named Value.
+  _aad_validate_fragment = var.apim_aad_audience != "" ? trimspace(<<-FRAG
+        <!--
+          AAD authentication: reject requests without a valid bearer token.
+          The audience must match the API app registration client ID.
+          Two issuers are listed to accept both v1 and v2 AAD tokens.
+        -->
+        <validate-jwt header-name="Authorization"
+                      failed-validation-httpcode="401"
+                      failed-validation-error-message="Unauthorized — valid AAD bearer token required">
+          <openid-config url="https://login.microsoftonline.com/${data.azurerm_client_config.current.tenant_id}/v2.0/.well-known/openid-configuration" />
+          <audiences>
+            <audience>{{aad-audience}}</audience>
+          </audiences>
+          <issuers>
+            <issuer>https://login.microsoftonline.com/${data.azurerm_client_config.current.tenant_id}/v2.0</issuer>
+            <issuer>https://sts.windows.net/${data.azurerm_client_config.current.tenant_id}/</issuer>
+          </issuers>
+        </validate-jwt>
+  FRAG
+  ) : ""
+
+  # Per-product monthly call quota fragment.
+  # Call counts are proxies for token budgets (assuming ~100 tokens/call average):
+  #   Finance: ${var.finance_monthly_calls} calls ≈ 10M tokens/month
+  #   Dev:     ${var.dev_monthly_calls} calls ≈ 500K tokens/month
+  # renewal-period = 2592000s (30 days). counter-key = subscription ID for isolation.
+  # NOTE: native token-level quotas (llm-token-limit policy) require Standard v2+.
+  # Actual per-call token usage is logged to App Insights via the outbound trace below.
+  _quota_fragment = trimspace(<<-FRAG
+        <!--
+          Per-product monthly quota — call count proxy for token budget.
+          Finance: ${var.finance_monthly_calls} calls/month (~10M tokens).
+          Dev:     ${var.dev_monthly_calls} calls/month (~500K tokens).
+        -->
+        <choose>
+          <when condition="@(context.Product?.Id == &quot;finance&quot;)">
+            <quota-by-key calls="${var.finance_monthly_calls}" renewal-period="2592000"
+                          counter-key="@(context.Subscription.Id)" />
+          </when>
+          <when condition="@(context.Product?.Id == &quot;dev&quot;)">
+            <quota-by-key calls="${var.dev_monthly_calls}" renewal-period="2592000"
+                          counter-key="@(context.Subscription.Id)" />
+          </when>
+        </choose>
+  FRAG
+  )
+
+  # Token chargeback outbound fragment.
+  # Parses usage.total_tokens from the response body and emits two signals:
+  #   1. trace → App Insights customEvents (queryable in Log Analytics for billing)
+  #   2. emit-metric → Azure Monitor custom metrics (alertable, dashboardable)
+  # Skipped for cache hits (cache-key == null means streaming was detected or
+  # a cache hit short-circuited inbound; we only log live backend responses).
+  _chargeback_fragment = trimspace(<<-FRAG
+        <!--
+          Cost chargeback: emit token usage per subscription and product.
+          Skipped for cached responses (no backend call was made).
+          Query in Log Analytics:
+            AppTraces
+            | where Message startswith "{"
+            | extend d = parse_json(Message)
+            | summarize sum(toint(d.tt)) by tostring(d.sub), tostring(d.pid)
+        -->
+        <choose>
+          <when condition="@(context.Response.StatusCode == 200 &amp;&amp; context.Variables[&quot;cache-key&quot;] != null)">
+            <trace source="token-chargeback" severity="information">
+              <message>@{
+                try {
+                  var resp = context.Response.Body.As&lt;JObject&gt;(preserveContent: true);
+                  return new Newtonsoft.Json.Linq.JObject {
+                    ["sub"] = context.Subscription?.Id ?? "anon",
+                    ["pid"] = context.Product?.Id    ?? "none",
+                    ["pt"]  = resp?["usage"]?["prompt_tokens"]?.Value&lt;int&gt;()     ?? 0,
+                    ["ct"]  = resp?["usage"]?["completion_tokens"]?.Value&lt;int&gt;() ?? 0,
+                    ["tt"]  = resp?["usage"]?["total_tokens"]?.Value&lt;int&gt;()      ?? 0,
+                    ["mod"] = resp?["model"]?.ToString() ?? "unknown"
+                  }.ToString();
+                } catch { return "{}"; }
+              }</message>
+            </trace>
+            <emit-metric name="InferenceTokenUsage" namespace="APIM/Chargeback"
+                         value="@{
+              try {
+                var resp = context.Response.Body.As&lt;JObject&gt;(preserveContent: true);
+                return (double)(resp?["usage"]?["total_tokens"]?.Value&lt;int&gt;() ?? 0);
+              } catch { return 0.0; }
+            }">
+              <dimension name="SubscriptionId" value="@(context.Subscription?.Id ?? &quot;anonymous&quot;)" />
+              <dimension name="ProductId"      value="@(context.Product?.Id     ?? &quot;none&quot;)" />
+            </emit-metric>
+          </when>
+        </choose>
+  FRAG
+  )
 
   apim_policy_simple = <<-XML
     <policies>
       <inbound>
         <base />
+        ${local._aad_validate_fragment}
+        ${local._quota_fragment}
         <rate-limit calls="60" renewal-period="60" />
         <cors>
           <allowed-origins><origin>*</origin></allowed-origins>
@@ -1164,6 +1280,7 @@ locals {
                                duration="3600" />
           </when>
         </choose>
+        ${local._chargeback_fragment}
       </outbound>
       <on-error><base /></on-error>
     </policies>
@@ -1173,6 +1290,8 @@ locals {
     <policies>
       <inbound>
         <base />
+        ${local._aad_validate_fragment}
+        ${local._quota_fragment}
         <rate-limit calls="60" renewal-period="60" />
         <cors>
           <allowed-origins><origin>*</origin></allowed-origins>
@@ -1274,6 +1393,7 @@ locals {
                                duration="3600" />
           </when>
         </choose>
+        ${local._chargeback_fragment}
       </outbound>
       <on-error><base /></on-error>
     </policies>
@@ -1286,6 +1406,120 @@ resource "azurerm_api_management_api_policy" "inference" {
   api_management_name = azurerm_api_management.lab.name
 
   xml_content = var.enable_foundry_fallback ? local.apim_policy_with_fallback : local.apim_policy_simple
+}
+
+###############################################################################
+# APIM Logger — Application Insights integration
+# All inference API requests are sampled at 100% for token chargeback accuracy.
+###############################################################################
+
+resource "azurerm_api_management_logger" "appinsights" {
+  name                = "appinsights-logger"
+  api_management_name = azurerm_api_management.lab.name
+  resource_group_name = azurerm_resource_group.lab.name
+  resource_id         = azurerm_application_insights.lab.id
+
+  application_insights {
+    instrumentation_key = azurerm_application_insights.lab.instrumentation_key
+  }
+}
+
+# API-level diagnostics — enables built-in App Insights logging (latency, status
+# codes, correlation IDs) and activates the trace policy in the API policy XML.
+resource "azurerm_api_management_api_diagnostic" "inference" {
+  identifier               = "applicationinsights"
+  resource_group_name      = azurerm_resource_group.lab.name
+  api_management_name      = azurerm_api_management.lab.name
+  api_name                 = azurerm_api_management_api.inference.name
+  api_management_logger_id = azurerm_api_management_logger.appinsights.id
+
+  sampling_percentage       = 100
+  always_log_errors         = true
+  log_client_ip             = true
+  verbosity                 = "information"
+  http_correlation_protocol = "W3C"
+
+  frontend_request {
+    headers_to_log = ["content-type"]
+  }
+
+  frontend_response {
+    headers_to_log = ["x-cache", "x-inference-backend", "content-type"]
+  }
+
+  # Do not log request/response bodies here — the policy trace already extracts
+  # and emits the structured token usage payload to keep App Insights lean.
+  backend_request {
+    body_bytes = 0
+  }
+
+  backend_response {
+    body_bytes = 0
+  }
+}
+
+###############################################################################
+# APIM Named Value — AAD audience for JWT validation
+# Only created when apim_aad_audience is provided; otherwise validation is skipped.
+###############################################################################
+
+resource "azurerm_api_management_named_value" "aad_audience" {
+  count               = var.apim_aad_audience != "" ? 1 : 0
+  name                = "aad-audience"
+  resource_group_name = azurerm_resource_group.lab.name
+  api_management_name = azurerm_api_management.lab.name
+  display_name        = "aad-audience"
+  secret              = false
+  value               = var.apim_aad_audience
+}
+
+###############################################################################
+# APIM Products — per-team token budgets
+#
+# Finance: 10M tokens/month — approval required, up to 10 subscriptions.
+# Dev:     500K tokens/month — self-serve, up to 50 subscriptions.
+#
+# Quota enforcement uses call-count as a proxy (see _quota_fragment in locals).
+# For hard token-level quotas, migrate APIM SKU to Standard v2 and enable the
+# llm-token-limit policy. Token usage is logged to App Insights regardless.
+###############################################################################
+
+resource "azurerm_api_management_product" "finance" {
+  product_id            = "finance"
+  api_management_name   = azurerm_api_management.lab.name
+  resource_group_name   = azurerm_resource_group.lab.name
+  display_name          = "Finance Team"
+  description           = "Finance team access — ${var.finance_monthly_calls} calls/month proxy (~10M token budget)"
+  subscription_required = true
+  subscriptions_limit   = 10
+  approval_required     = true
+  published             = true
+}
+
+resource "azurerm_api_management_product" "dev" {
+  product_id            = "dev"
+  api_management_name   = azurerm_api_management.lab.name
+  resource_group_name   = azurerm_resource_group.lab.name
+  display_name          = "Dev Team"
+  description           = "Dev team access — ${var.dev_monthly_calls} calls/month proxy (~500K token budget)"
+  subscription_required = true
+  subscriptions_limit   = 50
+  approval_required     = false
+  published             = true
+}
+
+resource "azurerm_api_management_product_api" "finance" {
+  api_name            = azurerm_api_management_api.inference.name
+  product_id          = azurerm_api_management_product.finance.product_id
+  api_management_name = azurerm_api_management.lab.name
+  resource_group_name = azurerm_resource_group.lab.name
+}
+
+resource "azurerm_api_management_product_api" "dev" {
+  api_name            = azurerm_api_management_api.inference.name
+  product_id          = azurerm_api_management_product.dev.product_id
+  api_management_name = azurerm_api_management.lab.name
+  resource_group_name = azurerm_resource_group.lab.name
 }
 
 ###############################################################################

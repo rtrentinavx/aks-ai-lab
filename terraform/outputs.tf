@@ -86,3 +86,33 @@ output "foundry_deployment" {
   value       = var.enable_foundry_fallback ? var.foundry_deployment : null
   description = "Azure OpenAI deployment name used as APIM circuit breaker fallback"
 }
+
+output "app_insights_connection_string" {
+  value       = azurerm_application_insights.lab.connection_string
+  sensitive   = true
+  description = "Application Insights connection string — use for SDK-based token telemetry from workloads"
+}
+
+output "app_insights_instrumentation_key" {
+  value       = azurerm_application_insights.lab.instrumentation_key
+  sensitive   = true
+  description = "Application Insights instrumentation key — used by APIM logger"
+}
+
+output "token_chargeback_query" {
+  value       = <<-KQL
+    // Token chargeback per subscription and product (run in Log Analytics)
+    AppTraces
+    | where AppRoleName == "${var.cluster_name}-apim"
+    | where Message startswith "{"
+    | extend d = parse_json(Message)
+    | where isnotempty(d.sub)
+    | summarize
+        PromptTokens     = sum(toint(d.pt)),
+        CompletionTokens = sum(toint(d.ct)),
+        TotalTokens      = sum(toint(d.tt))
+      by SubscriptionId = tostring(d.sub), ProductId = tostring(d.pid), Model = tostring(d.mod)
+    | order by TotalTokens desc
+  KQL
+  description = "KQL query to run in Log Analytics for per-team token chargeback reporting"
+}
