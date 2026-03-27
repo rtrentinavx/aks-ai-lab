@@ -86,8 +86,17 @@ strings never touch etcd.
 > GPU SKU availability varies significantly by region — NC4as_T4_v3 is broadly
 > available but H100 SKUs are quota-limited in most regions. Request quota at
 > [aka.ms/AzureGPUQuota](https://aka.ms/AzureGPUQuota) before designing for
-> specific GPU families. Spot instances are not compatible with KAITO workloads
-> due to `do-not-disrupt` preventing voluntary node disruption.
+> specific GPU families.
+>
+> **Spot GPU instances:** Azure spot pricing reduces GPU costs by ~75–80%
+> (NC4as_T4_v3: ~$0.10/hr vs $0.53/hr on-demand). The lab includes a spot
+> NodePool (`gpu-inference-spot`) for async/batch workloads. **Do not use spot
+> for synchronous HTTP inference or KAITO workloads.** KAITO's `do-not-disrupt`
+> annotation blocks Karpenter's voluntary consolidation but does *not* block
+> Azure spot eviction (an involuntary interruption) — the GPU node will still
+> be evicted mid-inference. Spot is safe for Service Bus queue workers where
+> jobs requeue on failure. See `manifests/nap/gpu-nodepool.yaml` for the
+> two-NodePool setup (on-demand primary, spot secondary).
 
 **What problem it solves:**
 Classic AKS cluster autoscaler requires pre-created node pools with fixed VM
@@ -526,10 +535,10 @@ cd terraform && terraform destroy
 | Component | When billed | Approx. cost |
 |---|---|---|
 | System node pool (D4ds_v5 x2) | Always | ~$0.37/hr total |
-| NC4as_T4_v3 (Phi-4/Phi-3) | Only when NAP provisions (vLLM Standalone) / always (KAITO) | ~$0.53/hr |
-| NC16as_T4_v3 (Mistral 7B) | Only when NAP provisions (vLLM Standalone) / always (KAITO) | ~$1.20/hr |
-| NC6s_v3 (Llama 3 8B) | Only when NAP provisions (vLLM Standalone) / always (KAITO) | ~$0.90/hr |
-| NC24ads_A100_v4 (Llama 3 70B) | Only when NAP provisions (vLLM Standalone) / always (KAITO) | ~$3.67/hr per node |
+| NC4as_T4_v3 (Phi-4/Phi-3) | vLLM Standalone: only when provisioned. KAITO: always | ~$0.53/hr on-demand / ~$0.10/hr spot |
+| NC16as_T4_v3 (Mistral 7B) | vLLM Standalone: only when provisioned. KAITO: always | ~$1.20/hr on-demand / ~$0.25/hr spot |
+| NC6s_v3 (Llama 3 8B) | vLLM Standalone: only when provisioned. KAITO: always | ~$0.90/hr on-demand |
+| NC24ads_A100_v4 (Llama 3 70B) | vLLM Standalone: only when provisioned. KAITO: always | ~$3.67/hr on-demand / ~$0.90/hr spot |
 | KEDA HTTP interceptor (2 replicas) | Always when HTTP scaler is deployed | ~$0.35/hr |
 | Key Vault | Always (minimal) | ~$5/mo |
 | Service Bus (Standard) | Per operation | ~$0.01/mo for lab |

@@ -75,6 +75,97 @@ spec:
     cpu: "96"
     memory: "896Gi"
 
+  # Weight controls NodePool priority when multiple pools can satisfy a request.
+  # Higher weight = tried first. on-demand pool (weight 50, below) is the fallback.
+  weight: 100
+
+---
+###############################################################################
+# GPU NodePool — Spot instances (~75-80% cheaper, eviction risk)
+#
+# USE FOR:
+#   - Service Bus async workers (jobs requeue on eviction, no data loss)
+#   - Batch/offline inference with retry logic
+#
+# DO NOT USE FOR:
+#   - Synchronous HTTP inference (active requests drop on eviction)
+#   - KAITO workloads (do-not-disrupt blocks voluntary disruption but Azure
+#     spot eviction is involuntary — it WILL still evict the node, killing
+#     any in-flight inference job without warning)
+#
+# PRICING EXAMPLES (East US, approx):
+#   NC4as_T4_v3:  on-demand $0.53/hr → spot ~$0.10/hr  (80% savings)
+#   NC16as_T4_v3: on-demand $1.20/hr → spot ~$0.25/hr  (80% savings)
+#   NC24ads_A100: on-demand $3.67/hr → spot ~$0.90/hr  (75% savings)
+#   A100 spot availability is limited — expect frequent evictions at peak hours.
+#
+# DEPLOYMENT:
+#   kubectl apply -f manifests/nap/gpu-nodepool.yaml
+#   Both NodePools are applied together. NAP tries spot first (weight 100),
+#   falls back to on-demand (weight 50) if no spot capacity is available.
+###############################################################################
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: gpu-inference-spot
+  annotations:
+    description: "Spot GPU nodes for async/batch inference — ~75% cheaper, eviction risk"
+spec:
+  template:
+    metadata:
+      labels:
+        workload-type: gpu-inference
+        capacity-type: spot
+    spec:
+      nodeClassRef:
+        group: karpenter.azure.com
+        kind: AKSNodeClass
+        name: gpu-inference-class
+
+      requirements:
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["spot"]
+
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["amd64"]
+
+        - key: karpenter.azure.com/sku-family
+          operator: In
+          values: ["NC"]
+
+        # T4 SKUs have better spot availability than A100.
+        # Broader SKU list improves the chance of getting capacity.
+        - key: karpenter.azure.com/sku-name
+          operator: In
+          values:
+            - Standard_NC4as_T4_v3
+            - Standard_NC8as_T4_v3
+            - Standard_NC16as_T4_v3
+
+        - key: kubernetes.io/os
+          operator: In
+          values: ["linux"]
+
+      taints:
+        - key: nvidia.com/gpu
+          value: "true"
+          effect: NoSchedule
+
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 2m
+
+  limits:
+    nvidia.com/gpu: "8"
+
+  # Lower weight than on-demand pool — spot is tried first via weight 100
+  # on the on-demand pool; this pool only wins when spot is explicitly requested
+  # via nodeSelector or when the on-demand pool is exhausted.
+  # Flip the weights (spot=100, on-demand=50) to make spot the default.
+  weight: 50
+
 ---
 ###############################################################################
 # AKSNodeClass — Azure-specific settings for GPU nodes
