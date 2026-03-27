@@ -1106,16 +1106,65 @@ locals {
     <policies>
       <inbound>
         <base />
-        <set-backend-service backend-id="${azurerm_api_management_backend.inference.name}" />
         <rate-limit calls="60" renewal-period="60" />
         <cors>
           <allowed-origins><origin>*</origin></allowed-origins>
           <allowed-methods><method>POST</method><method>OPTIONS</method></allowed-methods>
           <allowed-headers><header>*</header></allowed-headers>
         </cors>
+        <!--
+          Response caching keyed on model + messages content.
+          Cache is skipped for streaming requests (stream:true) because the
+          response body is chunked and cannot be replayed from cache.
+          TTL: 3600s. Uses APIM's built-in internal cache.
+          Upgrade to Azure Cache for Redis for distributed caching across
+          multiple APIM units or longer TTLs.
+        -->
+        <set-variable name="cache-key" value="@{
+          var body = context.Request.Body.As&lt;JObject&gt;(preserveContent: true);
+          var isStream = body["stream"] != null &amp;&amp; body["stream"].Value&lt;bool&gt;();
+          if (isStream) return (string)null;
+          var raw = (body["model"] ?? "").ToString() + ":" + (body["messages"] ?? "").ToString();
+          var bytes = System.Security.Cryptography.SHA256.Create()
+            .ComputeHash(System.Text.Encoding.UTF8.GetBytes(raw));
+          return "inf-" + BitConverter.ToString(bytes).Replace("-","").Substring(0,16).ToLower();
+        }" />
+        <choose>
+          <when condition="@(context.Variables["cache-key"] != null)">
+            <cache-lookup-value key="@((string)context.Variables["cache-key"])"
+                                variable-name="cached-response" />
+            <choose>
+              <when condition="@(context.Variables.ContainsKey("cached-response"))">
+                <return-response>
+                  <set-status code="200" reason="OK" />
+                  <set-header name="Content-Type" exists-action="override">
+                    <value>application/json</value>
+                  </set-header>
+                  <set-header name="X-Cache" exists-action="override">
+                    <value>HIT</value>
+                  </set-header>
+                  <set-body>@((string)context.Variables["cached-response"])</set-body>
+                </return-response>
+              </when>
+            </choose>
+          </when>
+        </choose>
+        <set-backend-service backend-id="${azurerm_api_management_backend.inference.name}" />
       </inbound>
       <backend><base /></backend>
-      <outbound><base /></outbound>
+      <outbound>
+        <base />
+        <set-header name="X-Cache" exists-action="skip">
+          <value>MISS</value>
+        </set-header>
+        <choose>
+          <when condition="@(context.Variables["cache-key"] != null &amp;&amp; context.Response.StatusCode == 200)">
+            <cache-store-value key="@((string)context.Variables["cache-key"])"
+                               value="@(context.Response.Body.As&lt;string&gt;(preserveContent: true))"
+                               duration="3600" />
+          </when>
+        </choose>
+      </outbound>
       <on-error><base /></on-error>
     </policies>
   XML
@@ -1130,6 +1179,35 @@ locals {
           <allowed-methods><method>POST</method><method>OPTIONS</method></allowed-methods>
           <allowed-headers><header>*</header></allowed-headers>
         </cors>
+        <set-variable name="cache-key" value="@{
+          var body = context.Request.Body.As&lt;JObject&gt;(preserveContent: true);
+          var isStream = body["stream"] != null &amp;&amp; body["stream"].Value&lt;bool&gt;();
+          if (isStream) return (string)null;
+          var raw = (body["model"] ?? "").ToString() + ":" + (body["messages"] ?? "").ToString();
+          var bytes = System.Security.Cryptography.SHA256.Create()
+            .ComputeHash(System.Text.Encoding.UTF8.GetBytes(raw));
+          return "inf-" + BitConverter.ToString(bytes).Replace("-","").Substring(0,16).ToLower();
+        }" />
+        <choose>
+          <when condition="@(context.Variables["cache-key"] != null)">
+            <cache-lookup-value key="@((string)context.Variables["cache-key"])"
+                                variable-name="cached-response" />
+            <choose>
+              <when condition="@(context.Variables.ContainsKey("cached-response"))">
+                <return-response>
+                  <set-status code="200" reason="OK" />
+                  <set-header name="Content-Type" exists-action="override">
+                    <value>application/json</value>
+                  </set-header>
+                  <set-header name="X-Cache" exists-action="override">
+                    <value>HIT</value>
+                  </set-header>
+                  <set-body>@((string)context.Variables["cached-response"])</set-body>
+                </return-response>
+              </when>
+            </choose>
+          </when>
+        </choose>
         <set-variable name="vllm-attempted" value="@(false)" />
         <set-backend-service backend-id="${azurerm_api_management_backend.inference.name}" />
       </inbound>
@@ -1186,6 +1264,16 @@ locals {
         <set-header name="X-Inference-Backend" exists-action="override">
           <value>@((bool)context.Variables.GetValueOrDefault&lt;bool&gt;("vllm-attempted") ? "vllm" : "azure-foundry")</value>
         </set-header>
+        <set-header name="X-Cache" exists-action="skip">
+          <value>MISS</value>
+        </set-header>
+        <choose>
+          <when condition="@(context.Variables["cache-key"] != null &amp;&amp; context.Response.StatusCode == 200)">
+            <cache-store-value key="@((string)context.Variables["cache-key"])"
+                               value="@(context.Response.Body.As&lt;string&gt;(preserveContent: true))"
+                               duration="3600" />
+          </when>
+        </choose>
       </outbound>
       <on-error><base /></on-error>
     </policies>
