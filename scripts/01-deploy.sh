@@ -146,6 +146,7 @@ helm upgrade --install alb-controller \
   --version 1.9.16 \
   --set albController.namespace=azure-alb-system \
   --set albController.podIdentity.clientID="$ALB_CLIENT_ID" \
+  --set-json 'albController.controller.tolerations=[{"key":"CriticalAddonsOnly","operator":"Exists","effect":"NoSchedule"}]' \
   --wait --timeout=5m
 
 echo "  ✓ ALB controller installed"
