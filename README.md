@@ -95,9 +95,18 @@ NAP picks the cheapest SKU that fits all requests:
 Pod pending → NAP provisions node (3-5 min)
 Pod running → model loads → inference starts
 Pod completed / scaled to 0 → node idle
-consolidateAfter: 2m → NAP deprovisions node
+consolidateAfter: 2m → NAP deprovisions node  ← only if do-not-disrupt is not set
 GPU billing stops
 ```
+
+> **Important:** KAITO sets `karpenter.sh/do-not-disrupt: "true"` on every
+> NodeClaim it creates ([source](https://github.com/kaito-project/kaito/blob/main/pkg/utils/nodeclaim/nodeclaim.go#L151)).
+> This blocks NAP consolidation — the GPU node stays alive as long as the
+> Workspace CRD exists, even when replicas are scaled to zero. True GPU billing
+> scale-to-zero with KAITO requires **deleting the Workspace**, not scaling
+> replicas. KAITO's official KEDA integration (v0.8.0+) scales pods only and
+> uses `minReplicaCount: 1` in all examples — scale-to-zero at the GPU node
+> level is not supported. See **KAITO vs vLLM Standalone** below.
 
 **Key CRDs in this lab:**
 - `NodePool` (Karpenter API) — constraints: GPU SKU families, capacity type
@@ -179,11 +188,25 @@ vllm:
                                  # Big win for chatbot workloads (same system prompt).
 ```
 
-**KAITO vs vLLM Standalone:**
-Use KAITO (`manifests/kaito/`) for supported presets — it handles GPU
-provisioner integration automatically. Use the standalone deployment
-(`manifests/vllm/vllm-standalone.yaml`) when you need custom LoRA adapters,
-quantized (GGUF/AWQ) weights, or a vLLM version newer than what KAITO packages.
+**KAITO vs vLLM Standalone — which to use:**
+
+| | KAITO | vLLM Standalone |
+|---|---|---|
+| Model packaging | Pre-built MCR images — no HuggingFace token needed | Pull from HuggingFace or your own registry |
+| GPU validation | Validates VRAM before scheduling | Fails at runtime (OOM) |
+| Multi-node (70B+) | Handled automatically (Ray topology) | Manual Ray configuration |
+| vLLM version control | Pinned to KAITO release | Any version |
+| True GPU scale-to-zero | ✗ — `do-not-disrupt` pins the node | ✓ — NAP deprovisions freely |
+| Cold start (node warm) | Fast — image cached on node | Fast — image cached on node |
+
+**Use KAITO** for always-on or near-always-on workloads (`minReplicaCount: 1`),
+multi-node large models, or when you want preset GPU validation with minimal YAML.
+
+**Use vLLM Standalone** (`manifests/vllm/vllm-standalone.yaml`) when true GPU
+billing scale-to-zero is required — bursty workloads, dev/lab environments, or
+any scenario where the GPU should deprovision during idle periods. Also use
+standalone for custom LoRA adapters, quantized (GGUF/AWQ) weights, or a vLLM
+version newer than what KAITO packages.
 
 **Checking workspace status:**
 ```bash
