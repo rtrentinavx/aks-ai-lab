@@ -380,8 +380,14 @@ resource "azurerm_kubernetes_cluster" "lab" {
   kubernetes_version  = var.kubernetes_version
   tags                = var.tags
 
-  local_account_disabled = true
+  # AKS-managed Azure AD integration — required for local_account_disabled.
+  # Azure RBAC replaces Kubernetes RBAC for access control.
+  azure_active_directory_role_based_access_control {
+    tenant_id          = data.azurerm_client_config.current.tenant_id
+    azure_rbac_enabled = true
+  }
 
+  local_account_disabled    = true
   automatic_upgrade_channel = "stable"
 
   # Private cluster — API server not reachable from public internet
@@ -568,6 +574,14 @@ resource "azurerm_role_assignment" "kv_workload" {
   scope                = azurerm_key_vault.lab.id
   role_definition_name = "Key Vault Secrets User"
   principal_id         = azurerm_user_assigned_identity.workload.principal_id
+}
+
+# Grant APIM managed identity access to read Key Vault secrets.
+# Required for azurerm_api_management_named_value with value_from_key_vault.
+resource "azurerm_role_assignment" "kv_apim" {
+  scope                = azurerm_key_vault.lab.id
+  role_definition_name = "Key Vault Secrets User"
+  principal_id         = azurerm_api_management.lab.identity[0].principal_id
 }
 
 ###############################################################################
@@ -937,7 +951,9 @@ resource "azurerm_api_management_backend" "inference" {
   resource_group_name = azurerm_resource_group.lab.name
   api_management_name = azurerm_api_management.lab.name
   protocol            = "http"
-  url                 = "http://${var.envoy_gateway_ip}/v1"
+  # Use a valid placeholder when envoy_gateway_ip is not yet known (fresh deploy).
+  # Update after cluster bootstrap: terraform apply -var envoy_gateway_ip=<IP>
+  url                 = var.envoy_gateway_ip != "" ? "http://${var.envoy_gateway_ip}/v1" : "http://0.0.0.0/v1"
 
   tls {
     validate_certificate_chain = false
@@ -1001,7 +1017,17 @@ resource "azurerm_api_management_backend" "foundry" {
   resource_group_name = azurerm_resource_group.lab.name
   api_management_name = azurerm_api_management.lab.name
   protocol            = "http"
-  url                 = "${azurerm_cognitive_account.foundry[0].endpoint}openai/deployments/${var.foundry_deployment}/chat/completions?api-version=2024-08-01-preview"
+  # Backend base URL — no query string (APIM rejects query strings in backend URL).
+  # The api-version and path suffix are appended in the circuit breaker policy
+  # via rewrite-uri when the fallback fires.
+  url                 = "${azurerm_cognitive_account.foundry[0].endpoint}openai/deployments/${var.foundry_deployment}"
+
+  tls {
+    validate_certificate_chain = true
+    validate_certificate_name  = true
+  }
+
+  depends_on = [azurerm_cognitive_account.foundry]
 }
 
 # APIM Named Value — references the Key Vault secret at runtime.
@@ -1018,7 +1044,10 @@ resource "azurerm_api_management_named_value" "foundry_api_key" {
     secret_id = azurerm_key_vault_secret.foundry_api_key[0].versionless_id
   }
 
-  depends_on = [azurerm_key_vault_secret.foundry_api_key]
+  depends_on = [
+    azurerm_key_vault_secret.foundry_api_key,
+    azurerm_role_assignment.kv_apim,
+  ]
 }
 
 resource "azurerm_api_management_api" "inference" {
@@ -1102,6 +1131,8 @@ locals {
               <set-header name="api-key" exists-action="override">
                 <value>{{foundry-api-key}}</value>
               </set-header>
+              <!-- Append the chat completions path and api-version to the backend base URL -->
+              <rewrite-uri template="/chat/completions?api-version=2024-08-01-preview" copy-unmatched-params="false" />
               <set-body>@{
                 var body = context.Request.Body.As&lt;JObject&gt;(preserveContent: true);
                 body["model"] = "${var.foundry_deployment}";
