@@ -106,6 +106,9 @@ helm upgrade --install http-add-on kedacore/keda-add-ons-http \
   --create-namespace \
   --set interceptor.replicas.min=2 \
   --set interceptor.replicas.max=5 \
+  --set-json 'interceptor.tolerations=[{"key":"CriticalAddonsOnly","operator":"Exists","effect":"NoSchedule"}]' \
+  --set-json 'scaler.tolerations=[{"key":"CriticalAddonsOnly","operator":"Exists","effect":"NoSchedule"}]' \
+  --set-json 'operator.tolerations=[{"key":"CriticalAddonsOnly","operator":"Exists","effect":"NoSchedule"}]' \
   --wait --timeout=5m
 
 if [[ "$INFERENCE_MODE" == "gpu" ]]; then

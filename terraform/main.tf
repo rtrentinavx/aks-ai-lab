@@ -368,7 +368,7 @@ resource "azurerm_kubernetes_cluster" "lab" {
   #checkov:skip=CKV_AZURE_170: Free SLA tier acceptable for lab; use Standard or Premium for production
   #checkov:skip=CKV_AZURE_226: Ephemeral OS disks require VM SKU support; managed disks used for compatibility with NAP
   #checkov:skip=CKV_AZURE_227: Host-based encryption requires subscription feature registration; not enabled in lab
-  #checkov:skip=CKV_AZURE_232: System node taint managed by NAP NodePool config, not AKS cluster resource
+  #checkov:skip=CKV_AZURE_232: only_critical_addons_enabled disabled — lab has a single system node pool; enabling it blocks KEDA HTTP add-on and other user add-ons. Add a separate user node pool in production and re-enable.
   #trivy:ignore:AVD-AZU-0041: API server authorized IP ranges conflict with private_cluster=false lab default
   #trivy:ignore:AVD-AZU-0042: RBAC enabled via azure_active_directory_role_based_access_control block; false positive
   #tfsec:ignore:AVD-AZU-0041: API server authorized IP ranges conflict with private_cluster=false lab default
@@ -408,7 +408,11 @@ resource "azurerm_kubernetes_cluster" "lab" {
     max_pods                     = 50
     vnet_subnet_id               = azurerm_subnet.aks.id
     temporary_name_for_rotation  = "systemtmp"
-    only_critical_addons_enabled = true
+    # only_critical_addons_enabled is intentionally disabled for this lab.
+    # Enabling it adds CriticalAddonsOnly:NoSchedule taint to system nodes,
+    # which blocks user add-ons (KEDA HTTP, ALB controller, etc.) that don't
+    # tolerate it. Production clusters should add a separate user node pool
+    # and re-enable this to isolate system from user workloads.
 
     upgrade_settings {
       max_surge = "33%"
