@@ -23,20 +23,7 @@ jobs:
             --directory . \
             --framework terraform kubernetes \
             --output cli \
-            --skip-check \
-              CKV_AZURE_7,CKV_AZURE_141,\
-              CKV_K8S_14,\
-              CKV_K8S_15,\
-              CKV_K8S_16,\
-              CKV_K8S_20,\
-              CKV_K8S_22,\
-              CKV_K8S_23,\
-              CKV_K8S_28,\
-              CKV_K8S_35,\
-              CKV_K8S_37,\
-              CKV_K8S_38,\
-              CKV_K8S_40,\
-              CKV_K8S_43 \
+            --skip-check CKV_AZURE_7,CKV_AZURE_141,CKV_K8S_14,CKV_K8S_15,CKV_K8S_16,CKV_K8S_20,CKV_K8S_22,CKV_K8S_23,CKV_K8S_28,CKV_K8S_35,CKV_K8S_37,CKV_K8S_38,CKV_K8S_40,CKV_K8S_43 \
             --quiet
           # Skipped K8S checks (GPU/inference requirements or lab trade-offs):
           # CKV_K8S_14/15 - ollama:latest tag; acceptable for lab
