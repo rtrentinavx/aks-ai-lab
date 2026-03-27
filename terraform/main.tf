@@ -1116,16 +1116,17 @@ resource "azurerm_api_management_api_operation" "chat_completions" {
 locals {
   # Heredocs cannot be used in ternary expressions in Terraform, so both
   # policy variants are defined as locals and selected via the conditional.
-  # Sub-fragments are interpolated into each variant to avoid duplication.
+  # AAD validate-jwt is injected using %{ if }~/%{ endif }~ template directives
+  # which produce zero output (no blank lines) when the condition is false.
 
-  # AAD JWT validation fragment — empty string when apim_aad_audience is not set.
-  # Authenticates the caller against AAD before any further processing.
-  # The audience ({{aad-audience}}) is stored as an APIM Named Value.
-  _aad_validate_fragment = var.apim_aad_audience != "" ? trimspace(<<-FRAG
+  apim_policy_simple = <<-XML
+    <policies>
+      <inbound>
+        <base />
+%{ if var.apim_aad_audience != "" ~}
         <!--
-          AAD authentication: reject requests without a valid bearer token.
-          The audience must match the API app registration client ID.
-          Two issuers are listed to accept both v1 and v2 AAD tokens.
+          AAD authentication: rejects requests without a valid AAD bearer token.
+          Audience must match the API app registration client ID ({{aad-audience}}).
         -->
         <validate-jwt header-name="Authorization"
                       failed-validation-httpcode="401"
@@ -1139,29 +1140,7 @@ locals {
             <issuer>https://sts.windows.net/${data.azurerm_client_config.current.tenant_id}/</issuer>
           </issuers>
         </validate-jwt>
-  FRAG
-  ) : ""
-
-  # Quota is enforced at the product level via azurerm_api_management_product_policy
-  # (see below). Product policies are the correct APIM scope for per-subscription
-  # quotas — they apply automatically per subscription key without any choose logic.
-  # This fragment is intentionally empty.
-  _quota_fragment = ""
-
-  # Token chargeback is handled by the App Insights diagnostic (see
-  # azurerm_api_management_api_diagnostic.inference below) which logs the
-  # backend response body. The usage.total_tokens field is captured there
-  # and queryable via the KQL in the token_chargeback_query output.
-  # The trace policy is intentionally omitted — it requires a confirmed active
-  # diagnostic at policy-save time and causes a 400 before the diagnostic settles.
-  _chargeback_fragment = ""
-
-  apim_policy_simple = <<-XML
-    <policies>
-      <inbound>
-        <base />
-        ${local._aad_validate_fragment}
-        ${local._quota_fragment}
+%{ endif ~}
         <rate-limit calls="60" renewal-period="60" />
         <cors>
           <allowed-origins><origin>*</origin></allowed-origins>
@@ -1220,7 +1199,6 @@ locals {
                                duration="3600" />
           </when>
         </choose>
-        ${local._chargeback_fragment}
       </outbound>
       <on-error><base /></on-error>
     </policies>
@@ -1230,8 +1208,24 @@ locals {
     <policies>
       <inbound>
         <base />
-        ${local._aad_validate_fragment}
-        ${local._quota_fragment}
+%{ if var.apim_aad_audience != "" ~}
+        <!--
+          AAD authentication: rejects requests without a valid AAD bearer token.
+          Audience must match the API app registration client ID ({{aad-audience}}).
+        -->
+        <validate-jwt header-name="Authorization"
+                      failed-validation-httpcode="401"
+                      failed-validation-error-message="Unauthorized — valid AAD bearer token required">
+          <openid-config url="https://login.microsoftonline.com/${data.azurerm_client_config.current.tenant_id}/v2.0/.well-known/openid-configuration" />
+          <audiences>
+            <audience>{{aad-audience}}</audience>
+          </audiences>
+          <issuers>
+            <issuer>https://login.microsoftonline.com/${data.azurerm_client_config.current.tenant_id}/v2.0</issuer>
+            <issuer>https://sts.windows.net/${data.azurerm_client_config.current.tenant_id}/</issuer>
+          </issuers>
+        </validate-jwt>
+%{ endif ~}
         <rate-limit calls="60" renewal-period="60" />
         <cors>
           <allowed-origins><origin>*</origin></allowed-origins>
@@ -1333,7 +1327,6 @@ locals {
                                duration="3600" />
           </when>
         </choose>
-        ${local._chargeback_fragment}
       </outbound>
       <on-error><base /></on-error>
     </policies>
