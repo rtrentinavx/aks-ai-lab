@@ -1131,8 +1131,15 @@ locals {
               <set-header name="api-key" exists-action="override">
                 <value>{{foundry-api-key}}</value>
               </set-header>
-              <!-- Append the chat completions path and api-version to the backend base URL -->
-              <rewrite-uri template="/chat/completions?api-version=2024-08-01-preview" copy-unmatched-params="false" />
+              <!--
+                The Foundry backend URL is {endpoint}/openai/deployments/{deployment}.
+                APIM appends the request path (/chat/completions) automatically.
+                set-query-parameter injects the required api-version.
+                rewrite-uri is NOT allowed in the backend section.
+              -->
+              <set-query-parameter name="api-version" exists-action="override">
+                <value>2024-08-01-preview</value>
+              </set-query-parameter>
               <set-body>@{
                 var body = context.Request.Body.As&lt;JObject&gt;(preserveContent: true);
                 body["model"] = "${var.foundry_deployment}";
