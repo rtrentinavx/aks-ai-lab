@@ -173,6 +173,8 @@ helm upgrade --install eg \
   --namespace envoy-gateway-system \
   --create-namespace \
   --skip-crds \
+  --set-json 'deployment.tolerations=[{"key":"CriticalAddonsOnly","operator":"Exists","effect":"NoSchedule"}]' \
+  --set-json 'certgen.tolerations=[{"key":"CriticalAddonsOnly","operator":"Exists","effect":"NoSchedule"}]' \
   --wait --timeout=5m
 
 echo "  ✓ Envoy Gateway installed"
