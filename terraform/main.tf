@@ -1142,31 +1142,11 @@ locals {
   FRAG
   ) : ""
 
-  # Per-product monthly call quota fragment.
-  # Call counts are proxies for token budgets (assuming ~100 tokens/call average):
-  #   Finance: ${var.finance_monthly_calls} calls ≈ 10M tokens/month
-  #   Dev:     ${var.dev_monthly_calls} calls ≈ 500K tokens/month
-  # renewal-period = 2592000s (30 days). counter-key = subscription ID for isolation.
-  # NOTE: native token-level quotas (llm-token-limit policy) require Standard v2+.
-  # Actual per-call token usage is logged to App Insights via the outbound trace below.
-  _quota_fragment = trimspace(<<-FRAG
-        <!--
-          Per-product monthly quota — call count proxy for token budget.
-          Finance: ${var.finance_monthly_calls} calls/month (~10M tokens).
-          Dev:     ${var.dev_monthly_calls} calls/month (~500K tokens).
-        -->
-        <choose>
-          <when condition="@(context.Product?.Id == &quot;finance&quot;)">
-            <quota-by-key calls="${var.finance_monthly_calls}" renewal-period="2592000"
-                          counter-key="@(context.Subscription?.Id ?? &quot;anon&quot;)" />
-          </when>
-          <when condition="@(context.Product?.Id == &quot;dev&quot;)">
-            <quota-by-key calls="${var.dev_monthly_calls}" renewal-period="2592000"
-                          counter-key="@(context.Subscription?.Id ?? &quot;anon&quot;)" />
-          </when>
-        </choose>
-  FRAG
-  )
+  # Quota is enforced at the product level via azurerm_api_management_product_policy
+  # (see below). Product policies are the correct APIM scope for per-subscription
+  # quotas — they apply automatically per subscription key without any choose logic.
+  # This fragment is intentionally empty.
+  _quota_fragment = ""
 
   # Token chargeback outbound fragment.
   # Parses usage tokens from the response body and emits a trace to App Insights.
@@ -1394,6 +1374,9 @@ resource "azurerm_api_management_api_policy" "inference" {
   api_management_name = azurerm_api_management.lab.name
 
   xml_content = var.enable_foundry_fallback ? local.apim_policy_with_fallback : local.apim_policy_simple
+
+  # trace policy in xml_content requires the App Insights diagnostic to be active.
+  depends_on = [azurerm_api_management_api_diagnostic.inference]
 }
 
 ###############################################################################
@@ -1508,6 +1491,47 @@ resource "azurerm_api_management_product_api" "dev" {
   product_id          = azurerm_api_management_product.dev.product_id
   api_management_name = azurerm_api_management.lab.name
   resource_group_name = azurerm_resource_group.lab.name
+}
+
+# Product-level quota policies — enforced per subscription key automatically.
+# Finance: ${var.finance_monthly_calls} calls/month proxy (~10M tokens at 100 tokens/call avg).
+# Dev:     ${var.dev_monthly_calls} calls/month proxy (~500K tokens).
+# renewal-period = 2592000s (30 days).
+# NOTE: for hard token-level enforcement migrate to APIM Standard v2 + llm-token-limit.
+resource "azurerm_api_management_product_policy" "finance" {
+  product_id          = azurerm_api_management_product.finance.product_id
+  api_management_name = azurerm_api_management.lab.name
+  resource_group_name = azurerm_resource_group.lab.name
+
+  xml_content = <<-XML
+    <policies>
+      <inbound>
+        <base />
+        <quota calls="${var.finance_monthly_calls}" renewal-period="2592000" />
+      </inbound>
+      <backend><base /></backend>
+      <outbound><base /></outbound>
+      <on-error><base /></on-error>
+    </policies>
+  XML
+}
+
+resource "azurerm_api_management_product_policy" "dev" {
+  product_id          = azurerm_api_management_product.dev.product_id
+  api_management_name = azurerm_api_management.lab.name
+  resource_group_name = azurerm_resource_group.lab.name
+
+  xml_content = <<-XML
+    <policies>
+      <inbound>
+        <base />
+        <quota calls="${var.dev_monthly_calls}" renewal-period="2592000" />
+      </inbound>
+      <backend><base /></backend>
+      <outbound><base /></outbound>
+      <on-error><base /></on-error>
+    </policies>
+  XML
 }
 
 ###############################################################################
