@@ -1,0 +1,8 @@
+exclude:
+  # AKS API server authorized IP ranges — conflicts with private_cluster=false lab
+  # default. Use private_cluster=true for production to restrict API server access.
+  - AVD-AZU-0041
+
+  # AKS RBAC — false positive. RBAC is enabled via the
+  # azure_active_directory_role_based_access_control block which tfsec does not detect.
+  - AVD-AZU-0042

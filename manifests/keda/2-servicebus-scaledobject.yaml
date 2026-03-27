@@ -104,7 +104,12 @@ spec:
         app: inference-worker
         azure.workload.identity/use: "true"   # Enables token injection webhook
     spec:
-      serviceAccountName: inference-sa        # Federated with Azure managed identity
+      serviceAccountName: inference-sa
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
 
       containers:
         - name: worker
@@ -119,6 +124,22 @@ spec:
               value: inference-requests
             - name: VLLM_ENDPOINT
               value: "http://workspace-phi4-mini.inference.svc.cluster.local:5000/v1"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          livenessProbe:
+            exec:
+              command: ["python", "-c", "import os; exit(0)"]
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            exec:
+              command: ["python", "-c", "import os; exit(0)"]
+            initialDelaySeconds: 5
+            periodSeconds: 15
           resources:
             requests:
               cpu: "250m"

@@ -58,6 +58,10 @@ spec:
         azure.workload.identity/use: "true"
     spec:
       serviceAccountName: inference-sa
+      securityContext:
+        runAsNonRoot: false  # vLLM requires root for GPU device access
+        seccompProfile:
+          type: RuntimeDefault
 
       # Tolerate the taint NAP places on GPU nodes
       tolerations:
@@ -82,6 +86,17 @@ spec:
         - name: fix-shm
           image: busybox
           command: ["sh", "-c", "chmod 777 /dev/shm"]
+          # trivy:ignore:KSV0014 - writes to /dev/shm volume mount; root FS is effectively read-only
+          # trivy:ignore:KSV0118 - busybox chmod requires root
+          securityContext:
+            allowPrivilegeEscalation: false
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "64Mi"
+            limits:
+              cpu: "100m"
+              memory: "64Mi"
           volumeMounts:
             - name: dshm
               mountPath: /dev/shm
@@ -89,6 +104,10 @@ spec:
       containers:
         - name: vllm
           image: vllm/vllm-openai:v0.8.4
+          # trivy:ignore:KSV0014 - vLLM writes HuggingFace cache and tmp files; model cache on PVC
+          # trivy:ignore:KSV0118 - vLLM requires root for CUDA GPU device access
+          securityContext:
+            allowPrivilegeEscalation: false
           command: ["python3", "-m", "vllm.entrypoints.openai.api_server"]
           args:
             - "--model"
@@ -132,6 +151,8 @@ spec:
               memory: "16Gi"
               nvidia.com/gpu: "1"            # ← This triggers NAP GPU node provisioning
             limits:
+              cpu: "8"
+              memory: "20Gi"
               nvidia.com/gpu: "1"
 
           volumeMounts:

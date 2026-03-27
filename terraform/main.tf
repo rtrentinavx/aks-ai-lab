@@ -369,6 +369,10 @@ resource "azurerm_kubernetes_cluster" "lab" {
   #checkov:skip=CKV_AZURE_226: Ephemeral OS disks require VM SKU support; managed disks used for compatibility with NAP
   #checkov:skip=CKV_AZURE_227: Host-based encryption requires subscription feature registration; not enabled in lab
   #checkov:skip=CKV_AZURE_232: System node taint managed by NAP NodePool config, not AKS cluster resource
+  #trivy:ignore:AVD-AZU-0041: API server authorized IP ranges conflict with private_cluster=false lab default
+  #trivy:ignore:AVD-AZU-0042: RBAC enabled via azure_active_directory_role_based_access_control block; false positive
+  #tfsec:ignore:AVD-AZU-0041: API server authorized IP ranges conflict with private_cluster=false lab default
+  #tfsec:ignore:AVD-AZU-0042: RBAC enabled via azure_active_directory_role_based_access_control block; false positive
   name                = var.cluster_name
   resource_group_name = azurerm_resource_group.lab.name
   location            = azurerm_resource_group.lab.location
@@ -531,6 +535,7 @@ resource "azurerm_role_assignment" "grafana_admin" {
 # Key Vault
 ###############################################################################
 
+#trivy:ignore:AVD-AZU-0013: network_acls block sets default_action=Deny; trivy static analysis does not evaluate the conditional ip_rules expression
 resource "azurerm_key_vault" "lab" {
   name                       = substr("${var.cluster_name}-kv-${random_string.kv_suffix.result}", 0, 24)
   resource_group_name        = azurerm_resource_group.lab.name

@@ -1,0 +1,19 @@
+# Trivy findings accepted as lab trade-offs or functional requirements.
+
+# AKS API server authorized IP ranges — conflicts with private_cluster=false lab default.
+AZU-0041
+
+# AKS RBAC — false positive. RBAC is enabled via azure_active_directory_role_based_access_control block.
+AZU-0042
+
+# Key Vault network ACL — default_action=Deny is set; trivy does not evaluate the conditional ip_rules expression.
+AZU-0013
+
+# DCGM Exporter — privileged: true required for NVIDIA GPU hardware enumeration.
+KSV-0017
+
+# readOnlyRootFilesystem — functional requirement for GPU/model containers (DCGM, vLLM, Ollama).
+KSV-0014
+
+# Default securityContext — DCGM, vLLM, Ollama require root for GPU/hardware access.
+KSV-0118

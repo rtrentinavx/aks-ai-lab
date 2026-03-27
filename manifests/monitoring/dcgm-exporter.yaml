@@ -56,8 +56,15 @@ spec:
           value: "true"
           effect: NoSchedule
 
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+
       containers:
         - name: dcgm-exporter
+          # trivy:ignore:KSV0014 - DCGM accesses /proc and /sys; readOnlyRootFilesystem incompatible with GPU hardware access
+          # trivy:ignore:KSV0017 - privileged: true required for NVIDIA GPU device enumeration via DCGM library
+          # trivy:ignore:KSV0118 - DCGM requires root for GPU hardware access
           image: nvcr.io/nvidia/k8s/dcgm-exporter:3.3.9-3.6.1-ubuntu22.04
           ports:
             - name: metrics
@@ -69,7 +76,20 @@ spec:
               value: "/etc/dcgm-exporter/llm-metrics.csv"
           securityContext:
             runAsNonRoot: false
-            privileged: true    # Required for GPU hardware access
+            privileged: true              # Required for GPU hardware access
+            allowPrivilegeEscalation: true  # Required when privileged: true
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 9400
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 9400
+            initialDelaySeconds: 15
+            periodSeconds: 10
           resources:
             requests:
               cpu: "100m"
