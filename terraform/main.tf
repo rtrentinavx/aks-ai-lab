@@ -1305,8 +1305,16 @@ resource "azurerm_api_management_api_policy" "inference" {
 
   xml_content = var.enable_foundry_fallback ? local.apim_policy_with_fallback : local.apim_policy_simple
 
-  # trace policy in xml_content requires the App Insights diagnostic to be active.
-  depends_on = [azurerm_api_management_api_diagnostic.inference]
+  # APIM normalizes policy XML (re-indents, reformats) when storing it, so the
+  # value Terraform reads back never matches what HCL computes. Every plan shows
+  # a spurious diff, and with an App Insights diagnostic attached the PUT is
+  # rejected with 400. ignore_changes prevents the perpetual update loop.
+  # To update the policy: edit xml_content, then run:
+  #   terraform state rm azurerm_api_management_api_policy.inference
+  #   terraform apply   (Terraform will CREATE with the new XML)
+  lifecycle {
+    ignore_changes = [xml_content]
+  }
 }
 
 ###############################################################################
