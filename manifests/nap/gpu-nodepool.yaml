@@ -71,7 +71,7 @@ spec:
 
   # Hard cap to prevent runaway GPU spend
   limits:
-    nvidia.com/gpu: "8"
+    nvidia.com/gpu: "3"
     cpu: "96"
     memory: "896Gi"
 
@@ -158,7 +158,7 @@ spec:
     consolidateAfter: 2m
 
   limits:
-    nvidia.com/gpu: "8"
+    nvidia.com/gpu: "3"
 
   # Lower weight than on-demand pool — spot is tried first via weight 100
   # on the on-demand pool; this pool only wins when spot is explicitly requested

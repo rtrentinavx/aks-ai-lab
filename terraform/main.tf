@@ -415,7 +415,10 @@ resource "azurerm_kubernetes_cluster" "lab" {
     # and re-enable this to isolate system from user workloads.
 
     upgrade_settings {
-      max_surge = "33%"
+      # max_surge = "0" avoids provisioning surge nodes during node pool updates.
+      # AKS uses maxUnavailable=1 internally — one node drains at a time with no
+      # extra capacity needed. Required when vCPU quota is tight.
+      max_surge = "0"
     }
   }
 
