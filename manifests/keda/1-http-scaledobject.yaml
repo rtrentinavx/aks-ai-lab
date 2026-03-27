@@ -51,9 +51,9 @@ spec:
   # KAITO creates a ClusterIP service named after the workspace.
   # E.g. workspace-phi4-mini → service name: workspace-phi4-mini
   scaleTargetRef:
-    deployment: workspace-phi4-mini   # Must match the Deployment KAITO creates
+    name: workspace-phi4-mini         # Must match the Deployment KAITO creates
     service: workspace-phi4-mini      # ClusterIP Service created by KAITO
-    port: 5000                        # vLLM listens on 5000 inside KAITO pods
+    port: 80                          # KAITO service exposes port 80 → pod 5000
 
   # Scale-to-zero in dev. Set min: 1 for production to avoid cold-start latency.
   replicas:

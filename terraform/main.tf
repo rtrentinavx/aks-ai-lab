@@ -262,6 +262,43 @@ resource "azapi_resource" "azure_monitor_workspace" {
 }
 
 ###############################################################################
+# Azure Managed Grafana
+###############################################################################
+
+resource "azurerm_dashboard_grafana" "lab" {
+  name                              = "${var.cluster_name}-grafana"
+  resource_group_name               = azurerm_resource_group.lab.name
+  location                          = azurerm_resource_group.lab.location
+  grafana_major_version             = 11
+  public_network_access_enabled     = true
+  zone_redundancy_enabled           = false
+
+  identity {
+    type = "SystemAssigned"
+  }
+
+  azure_monitor_workspace_integrations {
+    resource_id = azapi_resource.azure_monitor_workspace.id
+  }
+
+  tags = var.tags
+}
+
+# Allow Grafana to read from the Managed Prometheus workspace
+resource "azurerm_role_assignment" "grafana_prometheus_reader" {
+  scope                = azapi_resource.azure_monitor_workspace.id
+  role_definition_name = "Monitoring Data Reader"
+  principal_id         = azurerm_dashboard_grafana.lab.identity[0].principal_id
+}
+
+# Allow the current user/SP to access the Grafana instance
+resource "azurerm_role_assignment" "grafana_admin" {
+  scope                = azurerm_dashboard_grafana.lab.id
+  role_definition_name = "Grafana Admin"
+  principal_id         = data.azurerm_client_config.current.object_id
+}
+
+###############################################################################
 # Key Vault
 ###############################################################################
 
@@ -610,7 +647,7 @@ resource "azurerm_api_management_backend" "inference" {
   resource_group_name = azurerm_resource_group.lab.name
   api_management_name = azurerm_api_management.lab.name
   protocol            = "http"
-  url                 = "http://inference-gateway.inference.svc.cluster.local/v1"
+  url                 = "http://${var.envoy_gateway_ip}/v1"
 
   tls {
     validate_certificate_chain = false

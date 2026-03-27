@@ -25,6 +25,14 @@ spec:
         - ports:
             - port: "5000"
               protocol: TCP
+    # Allow KEDA HTTP add-on interceptor to reach vLLM (for scale-to-zero routing)
+    - fromEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: keda
+      toPorts:
+        - ports:
+            - port: "5000"
+              protocol: TCP
     # Allow Prometheus scraping of vLLM metrics
     - fromEndpoints:
         - matchLabels:

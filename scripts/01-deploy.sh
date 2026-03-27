@@ -142,12 +142,10 @@ echo -e "\n[6/8] Installing Envoy Gateway and Inference Extension CRDs..."
 kubectl apply --server-side --force-conflicts -f \
   https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.0/standard-install.yaml
 
-# Envoy Gateway CRDs — Helm skips CRD install on upgrades, so pull the chart
-# and apply the crds/ directory explicitly to guarantee they are always present
-helm pull oci://docker.io/envoyproxy/gateway-helm \
-  --version v1.3.0 --untar --untardir /tmp/eg-chart
-kubectl apply --server-side --force-conflicts -f /tmp/eg-chart/gateway-helm/crds/
-rm -rf /tmp/eg-chart
+# Envoy Gateway CRDs — helm upgrade never re-applies crds/ on subsequent runs,
+# so stream them directly from the chart on every deploy (idempotent).
+helm show crds oci://docker.io/envoyproxy/gateway-helm --version v1.3.0 \
+  | kubectl apply --server-side --force-conflicts -f -
 
 helm upgrade --install eg \
   oci://docker.io/envoyproxy/gateway-helm \

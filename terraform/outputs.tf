@@ -71,3 +71,8 @@ output "agfc_subnet_id" {
   value       = azurerm_subnet.agfc.id
   description = "Resource ID of the AGfC delegated subnet — used in ApplicationLoadBalancer manifest"
 }
+
+output "grafana_endpoint" {
+  value       = "https://${azurerm_dashboard_grafana.lab.endpoint}"
+  description = "Azure Managed Grafana URL"
+}

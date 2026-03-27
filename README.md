@@ -714,3 +714,35 @@ November 2026 only. Use it for this lab, not for production.
 See `docs/ingress-guide.md` for the full architecture, APIM policy examples,
 network topology, security checklist, and ready-to-apply manifests in
 `manifests/ingress/`.
+
+### Azure Firewall and Hub-Spoke: What This Lab Omits
+
+This lab uses a single-spoke VNet (AKS, APIM, and AFD in one network). Enterprise
+deployments typically add a hub VNet with Azure Firewall between the spokes:
+
+```
+Internet → AFD (WAF) → Azure Firewall (hub) → APIM (spoke) → AKS (spoke)
+```
+
+**What Azure Firewall adds that this lab lacks:**
+
+| Concern | This lab | With hub firewall |
+|---|---|---|
+| Egress control | Pods can reach any internet IP | All egress allow-listed and logged |
+| East-west isolation | Cilium policies per pod | Firewall enforces spoke-to-spoke rules |
+| Threat intelligence | None | Microsoft threat feed blocks malicious IPs |
+| Compliance audit trail | No centralized egress log | Every outbound connection in Log Analytics |
+
+**The gap that matters most right now:** the Envoy Gateway LoadBalancer IP is
+publicly reachable, meaning anyone can bypass AFD and APIM and call vLLM
+directly with no auth or rate limiting. Fix this with an NSG on the AKS subnet
+restricting port 80 inbound to the `ApiManagement` service tag only.
+
+**When to add Azure Firewall:**
+- Multiple teams sharing the cluster (hub-spoke isolates blast radius per spoke)
+- Compliance requirements mandating centralized egress logging (PCI-DSS, HIPAA)
+- VNet connected to on-prem via ExpressRoute or VPN
+
+**Cost note:** Azure Firewall Standard runs ~$1.25/hr (~$900/month). Not
+justified for a lab. The NSG-based mitigation above closes the most critical
+gap at zero cost.

@@ -15,14 +15,13 @@ spec:
     group: gateway.networking.k8s.io
     kind: Gateway
     name: inference-gateway
-    namespace: inference
   circuitBreaker:
     maxConnections: 200
     maxPendingRequests: 100
     maxParallelRequests: 200
   timeout:
     http:
-      responseTimeout: 180s   # Exceeds p99 generation time for large models
+      requestTimeout: 180s    # Exceeds p99 generation time for large models
 ---
 # ClientTrafficPolicy — keep-alive settings for long-lived SSE streams.
 apiVersion: gateway.envoyproxy.io/v1alpha1
@@ -35,7 +34,6 @@ spec:
     group: gateway.networking.k8s.io
     kind: Gateway
     name: inference-gateway
-    namespace: inference
   timeout:
     http:
       requestReceivedTimeout: 10s    # Time to receive full request headers

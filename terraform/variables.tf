@@ -48,6 +48,12 @@ variable "private_cluster" {
   default     = false
 }
 
+variable "envoy_gateway_ip" {
+  description = "External IP of the Envoy Gateway LoadBalancer service (inference-gateway in the inference namespace). Set after cluster bootstrap: terraform apply -var envoy_gateway_ip=<IP>"
+  type        = string
+  default     = ""
+}
+
 variable "tags" {
   description = "Resource tags"
   type        = map(string)

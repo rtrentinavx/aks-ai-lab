@@ -23,44 +23,31 @@ MANIFESTS="$(dirname "$SCRIPT_DIR")/manifests/kaito"
 NETWORKING_MANIFESTS="$(dirname "$SCRIPT_DIR")/manifests/networking"
 MODEL=${1:-phi4-mini}
 
-declare -A MODEL_FILES=(
-  [phi4-mini]="workspace-phi4-mini.yaml"
-  [phi3-mini]="workspace-phi3-mini.yaml"
-  [mistral-7b]="workspace-mistral-7b.yaml"
-  [llama3-8b]="workspace-llama3-8b.yaml"
-  [llama3-70b]="workspace-llama3-70b.yaml"
-)
+case "$MODEL" in
+  phi4-mini)  MODEL_FILE="workspace-phi4-mini.yaml";  MODEL_POOL="phi-4-mini-instruct";         MODEL_DESC="Phi-4 Mini Instruct | GPU: 1x T4 (NC4as_T4_v3) | VRAM: 16GB | Est. provision: 4-6 min"  ;;
+  phi3-mini)  MODEL_FILE="workspace-phi3-mini.yaml";  MODEL_POOL="phi-3-mini-128k-instruct";    MODEL_DESC="Phi-3 Mini 128K    | GPU: 1x T4 (NC8as_T4_v3)  | VRAM: 16GB | Est. provision: 4-6 min"  ;;
+  mistral-7b) MODEL_FILE="workspace-mistral-7b.yaml"; MODEL_POOL="mistral-7b-instruct";         MODEL_DESC="Mistral 7B Instruct| GPU: 1x T4 (NC16as_T4_v3) | VRAM: 16GB | Est. provision: 5-7 min"  ;;
+  llama3-8b)  MODEL_FILE="workspace-llama3-8b.yaml";  MODEL_POOL="llama-3.1-8b-instruct";       MODEL_DESC="Llama 3.1 8B       | GPU: 1x V100 (NC6s_v3)    | VRAM: 16GB | Est. provision: 6-8 min"  ;;
+  llama3-70b) MODEL_FILE="workspace-llama3-70b.yaml"; MODEL_POOL="llama-3.3-70b-instruct";      MODEL_DESC="Llama 3.3 70B     | GPU: 2x A100 (NC24ads)    | VRAM: 160GB| Est. provision: 8-12 min" ;;
+  *)
+    echo "Unknown model: $MODEL"
+    echo "Available: phi4-mini phi3-mini mistral-7b llama3-8b llama3-70b"
+    exit 1
+    ;;
+esac
 
-declare -A MODEL_POOLS=(
-  [phi4-mini]="phi-4-mini-instruct"
-  [phi3-mini]="phi-3-mini-128k-instruct"
-  [mistral-7b]="mistral-7b-instruct"
-  [llama3-8b]="llama-3.1-8b-instruct"
-  [llama3-70b]="llama-3.3-70b-instruct"
-)
-
-declare -A MODEL_DESCRIPTIONS=(
-  [phi4-mini]="Phi-4 Mini Instruct | GPU: 1x T4 (NC4as_T4_v3) | VRAM: 16GB | Est. provision: 4-6 min"
-  [phi3-mini]="Phi-3 Mini 128K    | GPU: 1x T4 (NC8as_T4_v3)  | VRAM: 16GB | Est. provision: 4-6 min"
-  [mistral-7b]="Mistral 7B Instruct| GPU: 1x T4 (NC16as_T4_v3) | VRAM: 16GB | Est. provision: 5-7 min"
-  [llama3-8b]="Llama 3.1 8B       | GPU: 1x V100 (NC6s_v3)    | VRAM: 16GB | Est. provision: 6-8 min"
-  [llama3-70b]="Llama 3.3 70B     | GPU: 2x A100 (NC24ads)    | VRAM: 160GB| Est. provision: 8-12 min"
-)
-
-if [[ -z "${MODEL_FILES[$MODEL]+_}" ]]; then
-  echo "Unknown model: $MODEL"
-  echo "Available: ${!MODEL_FILES[*]}"
-  exit 1
-fi
-
-MANIFEST="${MANIFESTS}/${MODEL_FILES[$MODEL]}"
+MANIFEST="${MANIFESTS}/${MODEL_FILE}"
 echo "============================================================"
-echo "  Deploying: ${MODEL_DESCRIPTIONS[$MODEL]}"
+echo "  Deploying: $MODEL_DESC"
 echo "============================================================"
 echo ""
 
-kubectl apply -f "$MANIFEST"
-echo "  Workspace CRD applied. Watching status..."
+# Two-pass apply: the manifest bundles a ConfigMap + Workspace in one file.
+# The KAITO admission webhook validates the Workspace on the same API server
+# round-trip before the ConfigMap is committed, so the first pass creates the
+# ConfigMap (Workspace is rejected) and the second pass succeeds for both.
+kubectl apply -f "$MANIFEST" || kubectl apply -f "$MANIFEST"
+echo "  Workspace applied. Watching status..."
 echo ""
 echo "  NAP will now:"
 echo "    1. Detect the pending pod (GPU resource request)"
@@ -94,7 +81,7 @@ for i in $(seq 1 60); do
     # Apply InferencePool so Envoy Gateway can route to this model
     echo "  Applying InferencePool for ${MODEL_POOLS[$MODEL]}..."
     sed \
-      -e "s|<MODEL_NAME>|${MODEL_POOLS[$MODEL]}|g" \
+      -e "s|<MODEL_NAME>|${MODEL_POOL}|g" \
       -e "s|<WORKSPACE_NAME>|$WORKSPACE_NAME|g" \
       "$NETWORKING_MANIFESTS/05-inference-pool.yaml" | kubectl apply -f -
     echo "  ✓ InferencePool created — Envoy Gateway will route /v1 to this model"

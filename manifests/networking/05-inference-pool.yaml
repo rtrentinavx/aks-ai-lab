@@ -18,8 +18,7 @@ metadata:
 spec:
   targetPortNumber: 5000
   selector:
-    matchLabels:
-      app: <WORKSPACE_NAME>
+    app: <WORKSPACE_NAME>
   extensionRef:
     name: inference-ext-server
 ---
