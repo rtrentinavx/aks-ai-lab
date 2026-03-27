@@ -101,12 +101,16 @@ GPU billing stops
 
 > **Important:** KAITO sets `karpenter.sh/do-not-disrupt: "true"` on every
 > NodeClaim it creates ([source](https://github.com/kaito-project/kaito/blob/main/pkg/utils/nodeclaim/nodeclaim.go#L151)).
-> This blocks NAP consolidation — the GPU node stays alive as long as the
-> Workspace CRD exists, even when replicas are scaled to zero. True GPU billing
-> scale-to-zero with KAITO requires **deleting the Workspace**, not scaling
-> replicas. KAITO's official KEDA integration (v0.8.0+) scales pods only and
-> uses `minReplicaCount: 1` in all examples — scale-to-zero at the GPU node
-> level is not supported. See **KAITO vs vLLM Standalone** below.
+> This blocks Karpenter's voluntary disruption (consolidation) — the GPU node
+> stays alive as long as the Workspace CRD exists, even when replicas are
+> scaled to zero by KEDA. `do-not-disrupt` only blocks *voluntary* disruption;
+> when the Workspace is deleted, KAITO's GC finalizer deletes the NodeClaim
+> directly ([workspace_gc_finalizer.go](https://github.com/kaito-project/kaito/blob/main/pkg/workspace/controllers/workspace_gc_finalizer.go)),
+> which bypasses the annotation and terminates the node. KAITO's official KEDA
+> integration (v0.8.0+) scales pods only and uses `minReplicaCount: 1` in all
+> examples — GPU node scale-to-zero is not supported
+> ([issue #306](https://github.com/kaito-project/kaito/issues/306)).
+> See **KAITO vs vLLM Standalone** below.
 
 **Key CRDs in this lab:**
 - `NodePool` (Karpenter API) — constraints: GPU SKU families, capacity type
@@ -457,7 +461,8 @@ kubectl describe scaledobject inference-sb-scaler -n inference
 kubectl exec -n inference <pod-name> -- nvidia-smi
 
 # View vLLM metrics (port-forward first)
-kubectl port-forward svc/workspace-phi4-mini 5000:5000 -n inference &
+# KAITO service exposes port 80 externally → pod port 5000
+kubectl port-forward svc/workspace-phi4-mini 5000:80 -n inference &
 curl http://localhost:5000/metrics | grep vllm
 
 # Force scale-to-zero (test cold-start)
@@ -718,9 +723,9 @@ so identical prompts never hit the GPU.
 
 ### NGINX Is Retiring — Don't Build on It
 
-The community NGINX Ingress controller reached end-of-life March 2026.
-Microsoft's App Routing add-on (NGINX-based) is supported through
-November 2026 only. Use it for this lab, not for production.
+The community NGINX Ingress controller reached end-of-life in March 2026.
+Microsoft's App Routing add-on (NGINX-based) continues under Microsoft support
+through November 2026. Use it for this lab, not for production.
 
 ### In-Cluster Options
 
