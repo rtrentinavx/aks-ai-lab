@@ -945,20 +945,67 @@ resource "azurerm_api_management_backend" "inference" {
   }
 }
 
-# Azure AI Foundry fallback backend — only created when enable_foundry_fallback = true.
-# The Foundry API key is stored in Key Vault as "foundry-api-key" and surfaced
-# into APIM as a Named Value so it never appears in policy XML.
+###############################################################################
+# Azure OpenAI (AI Foundry) — circuit breaker fallback for vLLM
+# All resources gated on enable_foundry_fallback (default: true).
+###############################################################################
+
+resource "azurerm_cognitive_account" "foundry" {
+  count                 = var.enable_foundry_fallback ? 1 : 0
+  name                  = "${var.cluster_name}-foundry"
+  resource_group_name   = azurerm_resource_group.lab.name
+  location              = azurerm_resource_group.lab.location
+  kind                  = "OpenAI"
+  sku_name              = "S0"
+  custom_subdomain_name = "${var.cluster_name}-foundry"
+  tags                  = var.tags
+
+  network_acls {
+    default_action = "Allow"
+  }
+}
+
+resource "azurerm_cognitive_deployment" "fallback" {
+  count                = var.enable_foundry_fallback ? 1 : 0
+  name                 = var.foundry_deployment
+  cognitive_account_id = azurerm_cognitive_account.foundry[0].id
+
+  model {
+    format  = "OpenAI"
+    name    = "gpt-4o-mini"
+    version = "2024-07-18"
+  }
+
+  sku {
+    name     = "Standard"
+    capacity = var.foundry_capacity
+  }
+}
+
+# Store the Azure OpenAI API key in Key Vault automatically.
+# APIM pulls this via Named Value — the key never appears in Terraform state outputs.
+resource "azurerm_key_vault_secret" "foundry_api_key" {
+  count        = var.enable_foundry_fallback ? 1 : 0
+  name         = "foundry-api-key"
+  value        = azurerm_cognitive_account.foundry[0].primary_access_key
+  key_vault_id = azurerm_key_vault.lab.id
+
+  depends_on = [azurerm_role_assignment.kv_operator]
+}
+
+# APIM backend pointing to the Azure OpenAI deployment endpoint.
+# URL is derived from the created cognitive account — no manual endpoint variable needed.
 resource "azurerm_api_management_backend" "foundry" {
   count               = var.enable_foundry_fallback ? 1 : 0
   name                = "azure-foundry-backend"
   resource_group_name = azurerm_resource_group.lab.name
   api_management_name = azurerm_api_management.lab.name
   protocol            = "http"
-  url                 = "${var.foundry_endpoint}/chat/completions?api-version=2024-08-01-preview"
+  url                 = "${azurerm_cognitive_account.foundry[0].endpoint}openai/deployments/${var.foundry_deployment}/chat/completions?api-version=2024-08-01-preview"
 }
 
-# Named Value — pulls the Foundry API key from Key Vault at runtime.
-# APIM fetches the secret on each policy evaluation; the key never touches Terraform state.
+# APIM Named Value — references the Key Vault secret at runtime.
+# APIM fetches the value on each policy evaluation via its system-assigned identity.
 resource "azurerm_api_management_named_value" "foundry_api_key" {
   count               = var.enable_foundry_fallback ? 1 : 0
   name                = "foundry-api-key"
@@ -968,8 +1015,10 @@ resource "azurerm_api_management_named_value" "foundry_api_key" {
   secret              = true
 
   value_from_key_vault {
-    secret_id = "${azurerm_key_vault.lab.vault_uri}secrets/foundry-api-key"
+    secret_id = azurerm_key_vault_secret.foundry_api_key[0].versionless_id
   }
+
+  depends_on = [azurerm_key_vault_secret.foundry_api_key]
 }
 
 resource "azurerm_api_management_api" "inference" {

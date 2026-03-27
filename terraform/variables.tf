@@ -65,21 +65,21 @@ variable "envoy_gateway_ip" {
 }
 
 variable "enable_foundry_fallback" {
-  description = "Deploy Azure AI Foundry backend and enable APIM circuit breaker failover. When vLLM returns 502/503/504 or times out, APIM retries the request against the Foundry deployment. Requires foundry_endpoint and foundry_deployment to be set."
+  description = "Deploy Azure OpenAI (Foundry) resource and enable APIM circuit breaker failover to it. Creates azurerm_cognitive_account, a gpt-4o-mini deployment, stores the API key in Key Vault, and configures the APIM retry policy. Default true."
   type        = bool
-  default     = false
-}
-
-variable "foundry_endpoint" {
-  description = "Azure AI Foundry (Azure OpenAI) endpoint. Example: https://my-resource.openai.azure.com/openai/deployments/gpt-4o"
-  type        = string
-  default     = ""
+  default     = true
 }
 
 variable "foundry_deployment" {
-  description = "Azure AI Foundry deployment name used in the fallback backend URL."
+  description = "Name of the Azure OpenAI model deployment used as the APIM fallback. Must be a model available in the cluster region."
   type        = string
-  default     = "gpt-4o"
+  default     = "gpt-4o-mini"
+}
+
+variable "foundry_capacity" {
+  description = "Azure OpenAI deployment capacity in thousands of tokens per minute (TPM). 10 = 10K TPM."
+  type        = number
+  default     = 10
 }
 
 variable "enable_service_bus" {

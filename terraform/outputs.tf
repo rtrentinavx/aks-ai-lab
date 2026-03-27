@@ -76,3 +76,13 @@ output "grafana_endpoint" {
   value       = "https://${azurerm_dashboard_grafana.lab.endpoint}"
   description = "Azure Managed Grafana URL"
 }
+
+output "foundry_endpoint" {
+  value       = var.enable_foundry_fallback ? azurerm_cognitive_account.foundry[0].endpoint : null
+  description = "Azure OpenAI endpoint (null when enable_foundry_fallback = false)"
+}
+
+output "foundry_deployment" {
+  value       = var.enable_foundry_fallback ? var.foundry_deployment : null
+  description = "Azure OpenAI deployment name used as APIM circuit breaker fallback"
+}
