@@ -40,6 +40,18 @@ target deployment has 0 replicas, the proxy holds the connection open, signals
 KEDA to scale up, and forwards the request once the pod is ready. This is
 transparent to the client — they just see extra latency on the first request.
 
+**HTTP Add-on production caveats:**
+- **Always-on cost:** the 2 interceptor replicas run continuously regardless of
+  inference traffic (~$0.35/hr on Standard_D2ds_v5). This is not included in
+  scale-to-zero savings calculations and is the minimum cost floor for HTTP-triggered scaling.
+- **Cold-start timeout:** the proxy has a finite wait timeout. If NAP provisioning
+  + container pull + model load exceeds it, the client receives a 503 even if the
+  pod eventually becomes ready. Set `scaledownPeriod` high enough that the GPU
+  node stays warm between requests during active usage periods.
+- **Long-generation workloads:** for models that generate responses taking >60s
+  (e.g. Llama 3.3 70B on complex prompts), use the Service Bus trigger instead —
+  it provides durable buffering with no proxy timeout constraint.
+
 **Key tuning parameters:**
 ```yaml
 cooldownPeriod: 120     # Seconds of idle before scaling to zero.
@@ -66,6 +78,16 @@ strings never touch etcd.
 ---
 
 ### 2. NAP — Node Auto Provisioning (Karpenter on AKS)
+
+> **Preview status:** NAP is in public preview as of early 2026. Microsoft's
+> support boundary for preview features differs from GA — it is not covered by
+> an SLA and breaking changes may occur. Verify current status at
+> [aka.ms/aks-nap](https://aka.ms/aks-nap) before using in production.
+> GPU SKU availability varies significantly by region — NC4as_T4_v3 is broadly
+> available but H100 SKUs are quota-limited in most regions. Request quota at
+> [aka.ms/AzureGPUQuota](https://aka.ms/AzureGPUQuota) before designing for
+> specific GPU families. Spot instances are not compatible with KAITO workloads
+> due to `do-not-disrupt` preventing voluntary node disruption.
 
 **What problem it solves:**
 Classic AKS cluster autoscaler requires pre-created node pools with fixed VM
@@ -167,12 +189,17 @@ NAP provisions the GPU node in parallel (step 3 triggers it).
 
 **Preset model matrix in this lab:**
 
+> ¹ NC6s_v3 (V100) is an older GPU generation being progressively retired from
+> Azure regions. Verify availability in your target region before depending on
+> it. If unavailable, NC8as_T4_v3 is the recommended alternative for Llama 3.1 8B
+> with quantization (AWQ/GPTQ reduces VRAM requirement to ~10 GB).
+
 | KAITO Preset | File | Min GPU | Min VRAM | Approx GPU VM |
 |---|---|---|---|---|
 | `phi-4-mini-instruct` | workspace-phi4-mini.yaml | 1x T4 | 8 GB | NC4as_T4_v3 |
 | `phi-3-mini-128k-instruct` | workspace-phi3-mini.yaml | 1x T4 | 10 GB | NC8as_T4_v3 |
 | `mistral-7b-instruct` | workspace-mistral-7b.yaml | 1x T4 | 14 GB | NC16as_T4_v3 |
-| `llama-3.1-8b-instruct` | workspace-llama3-8b.yaml | 1x V100 | 16 GB | NC6s_v3 |
+| `llama-3.1-8b-instruct` | workspace-llama3-8b.yaml | 1x V100 | 16 GB | NC6s_v3 ¹ |
 | `llama-3.3-70b-instruct` | workspace-llama3-70b.yaml | 2x A100 | 160 GB | 2x NC24ads_A100_v4 |
 
 **vLLM ConfigMap tuning:**
@@ -230,7 +257,7 @@ kubectl describe workspace workspace-phi4-mini -n inference
 - PagedAttention: manages KV cache as virtual memory pages → higher throughput
 - Continuous batching: processes multiple requests in parallel without waiting
 - OpenAI API compatibility: drop-in replacement for GPT-4 clients (no SDK change)
-- Tensor parallelism: split a model across multiple GPUs in one line (`--tensor-parallel-size 2`)
+- Tensor parallelism: split a model across multiple GPUs in one line (`--tensor-parallel-size 2`) — adds 10–30% TTFT latency overhead from inter-GPU synchronization; only use when the model does not fit on a single GPU
 - Prefix caching: reuse KV cache for repeated system prompts (significant for chatbots)
 
 **OpenAI-compatible endpoints:**
@@ -285,6 +312,14 @@ Azure Resource (Key Vault / Service Bus / Foundry)
 | `kaito-identity` | KAITO GPU provisioner | Contributor on AKS cluster (to provision nodes) |
 | `keda-identity` | KEDA operator | Monitoring Data Reader (Prometheus), Service Bus Data Owner |
 | `workload-identity` | Inference pods | Key Vault Secrets User, Service Bus Data Sender/Receiver |
+
+**Token lifetime:**
+AAD access tokens issued via Workload Identity are valid for 1 hour by default.
+Azure SDKs (Python, .NET, Java, JS) handle token refresh automatically. If your
+application exchanges the OIDC token directly (without an Azure SDK), you must
+implement refresh logic — the projected ServiceAccount token rotates, but your
+application is responsible for re-exchanging it for a fresh AAD token before
+expiry. Long-running inference worker processes (>1h) must account for this.
 
 **Secrets Store CSI Driver:**
 Mounts Key Vault secrets as files inside pods at `/mnt/secrets/`. Combined
@@ -483,19 +518,27 @@ cd terraform && terraform destroy
 
 ## Cost Awareness
 
+> Prices shown are approximate list prices for East US as of March 2026.
+> Regional pricing varies (can differ 20–40% in Southeast Asia, Europe, etc.).
+> For committed workloads, Reserved Instances reduce GPU costs by ~35–40%.
+> Verify current pricing at [azure.microsoft.com/pricing/calculator](https://azure.microsoft.com/pricing/calculator).
+
 | Component | When billed | Approx. cost |
 |---|---|---|
 | System node pool (D4ds_v5 x2) | Always | ~$0.37/hr total |
-| NC4as_T4_v3 (Phi-4/Phi-3) | Only when NAP provisions | ~$0.53/hr |
-| NC16as_T4_v3 (Mistral 7B) | Only when NAP provisions | ~$1.20/hr |
-| NC6s_v3 (Llama 3 8B) | Only when NAP provisions | ~$0.90/hr |
-| NC24ads_A100_v4 (Llama 3 70B) | Only when NAP provisions | ~$3.67/hr per node |
+| NC4as_T4_v3 (Phi-4/Phi-3) | Only when NAP provisions (vLLM Standalone) / always (KAITO) | ~$0.53/hr |
+| NC16as_T4_v3 (Mistral 7B) | Only when NAP provisions (vLLM Standalone) / always (KAITO) | ~$1.20/hr |
+| NC6s_v3 (Llama 3 8B) | Only when NAP provisions (vLLM Standalone) / always (KAITO) | ~$0.90/hr |
+| NC24ads_A100_v4 (Llama 3 70B) | Only when NAP provisions (vLLM Standalone) / always (KAITO) | ~$3.67/hr per node |
+| KEDA HTTP interceptor (2 replicas) | Always when HTTP scaler is deployed | ~$0.35/hr |
 | Key Vault | Always (minimal) | ~$5/mo |
 | Service Bus (Standard) | Per operation | ~$0.01/mo for lab |
 
-**NAP deprovisioning:** GPU nodes are removed after `consolidateAfter: 2m` of
-idle. A dev/test workflow that runs occasional requests will pay for GPU time
-only while actively inferencing — often under $5/day.
+**NAP deprovisioning (vLLM Standalone only):** GPU nodes are removed after
+`consolidateAfter: 2m` of idle. A dev/test workflow that runs occasional
+requests will pay for GPU time only while actively inferencing — often under
+$5/day. **KAITO workloads:** GPU node runs continuously while the Workspace
+CRD exists; scale-to-zero at the pod level does not reduce GPU billing.
 
 ---
 
@@ -545,7 +588,7 @@ Both run vLLM on an NVIDIA GPU. The difference is everything around it.
 | Dimension | VM (single GPU) | AKS + KAITO + NAP |
 |---|---|---|
 | Setup time | SSH + docker pull — minutes | Full stack — ~10 min first time |
-| GPU billing | 24/7, always on | Only while inference runs (NAP scale-to-zero) |
+| GPU billing | 24/7, always on | **vLLM Standalone:** only while inferencing (NAP scale-to-zero). **KAITO:** continuous while Workspace exists (`do-not-disrupt` blocks consolidation). |
 | Multi-model | Manual port juggling | One KAITO Workspace CRD per model |
 | Scaling to N replicas | Manual clone + load balancer | KEDA + NAP handles it automatically |
 | Model updates | SSH + container restart | `kubectl apply` new Workspace YAML |
@@ -597,8 +640,9 @@ Current API pricing vs self-hosted equivalent:
 *Self-hosted cost estimated from GPU VM $/hr ÷ throughput (tok/s × 3600)*
 
 Break-even threshold: roughly **50,000 requests/day** for a 7B model vs
-GPT-4o-mini. Below that, the API wins on simplicity. Above that, self-hosting
-typically saves 25–50%.
+GPT-4o-mini using **vLLM Standalone** (GPU scale-to-zero). With **KAITO**
+(GPU always-on), the threshold rises to ~227,000 requests/day. Below your
+break-even, the API wins on simplicity. Above it, self-hosting typically saves 25–50%.
 
 ### 3. Customization
 You can fine-tune open weights on your own domain data. KAITO supports QLoRA
@@ -638,7 +682,7 @@ Run through this in order — the first constraint that applies wins.
 2. What is your primary task?
    ├─ Customer support / chat       → Mistral 7B (fast, cheap, good instruct following)
    ├─ Code generation               → Mistral Large 2 or Llama 3.3 70B
-   ├─ Math / STEM / reasoning       → Phi-4 (beats GPT-4o on MATH benchmark: 80.4% vs 74.6%)
+   ├─ Math / STEM / reasoning       → Phi-4 (80.4% on MATH benchmark vs GPT-4o's 74.6%; MMLU is 67.3% — strong on math, weaker on general knowledge)
    ├─ Long documents / RAG          → Phi-3 Mini 128K or Llama 3.3 70B (128K context)
    ├─ Multi-turn agents / tool use  → Llama 3.3 70B (best open-source tool-use)
    └─ Edge / batch classification   → Phi-3 Mini or Llama 3.2 3B
